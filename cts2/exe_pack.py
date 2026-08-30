@@ -4,7 +4,7 @@ Layout of an F2.5 executable (as documented by the community CTFAK tools)::
 
     [ PE executable (the Clickteam runtime) ]
     [ pack: header + file manifest + files  ]   <- "PackData"
-    [ game data (MFA-like structure)        ]   <- needs CTFAK to re-serialize
+    [ game data (PAME/PAMU chunk list)      ]   <- read by cts2/gamedata.py
 
 The pack starts at the raw data pointer of a PE section called ``.extra``
 (falling back to the end of the last section).  The pack holds a manifest
@@ -12,10 +12,9 @@ of named payload files; each payload is either raw data or a zlib stream
 marked with the ``0xD9F8`` (i16 ``-9608``) sentinel.
 
 This module recovers those payloads using only the Python standard
-library.  It cannot replace CTFAK for the full EXE -> MFA rebuild (the
-game data region after the pack is only re-serialized by CTFAK), but it
-lets the app inspect any EXE and, when the pack contains a raw MFA,
-convert it directly with no external tools.
+library. The game-data region that follows the pack is parsed by
+``cts2/gamedata.py`` — together they cover the full EXE -> MFA rebuild
+with no external tools (no CTFAK needed).
 """
 from __future__ import annotations
 
