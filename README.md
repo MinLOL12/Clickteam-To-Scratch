@@ -124,10 +124,11 @@ What "no Python setup" means in practice:
 | Images that fail to decode | ✅ get a visible labelled placeholder instead of being dropped / "?" |
 | Event groups, conditions/actions/parameters/expressions | ✅ parsed & reported |
 | Event → readable notes (object names resolved) | ✅ visible in **Logic-Notes** |
-| Event → Scratch block transpiler | ✅ verified subset compiled to real blocks (System object + common Active actions via broadcast glue); everything else stays readable **Logic-Notes**, with per-frame mapped/unmapped counts reported as warnings |
+| Event → Scratch block transpiler | ✅ verified subset compiled to real blocks (System / Storyboard / Timer / Mouse-Keyboard + common Active actions via broadcast glue); everything else stays readable **Logic-Notes**, with per-frame mapped/unmapped counts reported as warnings |
 | Compilation progress | ✅ **live, animated, extremely detailed** — CLI (spinner + bar + per-image/per-chunk/per-event steps), web UI and desktop app |
 | Warnings & notes surfaced in the UI | ✅ streamed live during conversion + summarized after |
-| `.exe` compiled event programs | 🔶 reported (size/byte counts); not decoded into blocks |
+| `.exe` compiled event programs (ER>>/ERev) | ✅ decoded into the same event groups MFA uses, then transpiled to Scratch blocks |
+| Scratch 3 costume `assetId` / sprite fields | ✅ bare MD5 `assetId`, correct `md5ext`, required sprite x/y/visible/size fields so costumes actually render |
 | `.ccn` / `.apk` / `.bin` front-ends | 🔶 optional CTFAK fallback only |
 | MMF 1.5 / CNC builds, Fusion 3, encrypted builds | not yet |
 | Desktop app: portable Python auto-provisioning, no pip/venv | ✅ (Windows embeddable / system python3 elsewhere) |

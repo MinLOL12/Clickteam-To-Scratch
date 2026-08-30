@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 import unittest
 import zipfile
 
@@ -152,6 +153,63 @@ class TestConverter(unittest.TestCase):
         ops2 = [b["opcode"] for b in sb2.blocks.values()]
         self.assertIn("looks_show", ops2)
         self.assertNotIn("looks_hide", ops2)
+
+    def test_costume_asset_id_is_bare_md5(self):
+        # Scratch 3 requires assetId = md5 hex (no extension) and
+        # md5ext = md5 + ".png".  Putting the extension into assetId made
+        # every costume render as the empty "?" placeholder.
+        mfa = load_mfa(os.path.join(FIXTURES, "events.mfa"))
+        sb3, _report = build_project(mfa)
+        with zipfile.ZipFile(io.BytesIO(sb3)) as z:
+            pj = json.loads(z.read("project.json"))
+            for target in pj["targets"]:
+                if target["isStage"]:
+                    self.assertIn("tempo", target)
+                else:
+                    for key in ("x", "y", "size", "direction", "visible",
+                                "draggable", "rotationStyle"):
+                        self.assertIn(key, target)
+                for costume in target["costumes"]:
+                    asset_id = costume["assetId"]
+                    md5ext = costume["md5ext"]
+                    self.assertNotIn(
+                        ".", asset_id,
+                        msg=f"assetId must be bare md5, got {asset_id}")
+                    self.assertEqual(len(asset_id), 32)
+                    self.assertTrue(md5ext.startswith(asset_id + "."))
+                    self.assertIn(md5ext, z.namelist())
+                # broadcasts dict must be {id: name}, not {id: [name, id]}
+                for _bid, bval in target.get("broadcasts", {}).items():
+                    self.assertIsInstance(bval, str)
+
+    def test_exe_sprite_costumes_have_valid_asset_ids(self):
+        pixels = bytes([0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255])
+        img = image_item_normal(0, 2, 2, pixels, mode=4, flags=0)
+        game = build_game_data(
+            name="My Game", unicode=True, build=294, images=[img],
+            objects_25=[object_common_25(frames_per_anim=((0,),))],
+            object_names=("Player",),
+            frames=[frame_chunk(name="Frame 1",
+                                instances=(frame_instance(0, 0, 320, 240),),
+                                layers=(("Layer 1", 1.0, 1.0),))],
+            frame_handles=(0,),
+        )
+        exe = build_exe(game, pack_files=[], unicode=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.exe")
+            with open(path, "wb") as fh:
+                fh.write(exe)
+            r = convert_file(path, os.path.join(tmp, "out.sb3"))
+        with zipfile.ZipFile(io.BytesIO(r["project"])) as z:
+            pj = json.loads(z.read("project.json"))
+            player = [t for t in pj["targets"] if t["name"] == "Frame1-Player"]
+            self.assertEqual(len(player), 1)
+            c = player[0]["costumes"][0]
+            self.assertNotIn(".", c["assetId"])
+            self.assertEqual(c["md5ext"], c["assetId"] + ".png")
+            self.assertIn(c["md5ext"], z.namelist())
+            png = z.read(c["md5ext"])
+            self.assertTrue(png.startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":

@@ -513,8 +513,11 @@ class TestGameData(unittest.TestCase):
             frames=[frame],
         )
         exe = build_exe(game)
-        _mfa, notes = self._load(exe)
+        mfa, notes = self._load(exe)
         self.assertTrue(any("compiled event" in n for n in notes))
+        # Even a garbage events blob is recorded; decoding yields 0 groups
+        # without crashing the conversion.
+        self.assertEqual(len(mfa.frames[0].event_groups), 0)
 
 
 if __name__ == "__main__":
