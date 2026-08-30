@@ -143,9 +143,11 @@ pack-resident EXE conversion never need it.
 ## Web UI
 
 `--web` serves a single-page uploader. It parses the file locally in the
-Python process and returns the `.sb3`. The live preview origin is a
-`0.0.0.0`-bound server, so it works from the browser preview without any
-localhost configuration.
+Python process and returns the `.sb3`. The server binds to `0.0.0.0` so
+forwarded/container previews can reach it, but the URL to open locally is
+`http://localhost:8000` (`0.0.0.0` is only a bind address, not a valid browser
+destination). In Arena or another hosted environment, open the generated live
+preview URL instead.
 
 ## Tests
 

@@ -118,8 +118,13 @@ class _H(BaseHTTPRequestHandler):
 
 
 def serve(port: int = 8000):
+    # Bind on every interface so forwarded/container previews can reach the
+    # server, but do not advertise 0.0.0.0 as a browser URL.  0.0.0.0 is a
+    # valid bind address, not a routable destination, and Chromium reports
+    # ERR_ADDRESS_INVALID when a user follows it.
     httpd = ThreadingHTTPServer(("0.0.0.0", port), _H)
-    print(f"Clickteam To Scratch web UI running at http://0.0.0.0:{port}")
+    print(f"Clickteam To Scratch web UI running at http://localhost:{port}", flush=True)
+    print("(The server is listening on all interfaces for forwarded previews.)", flush=True)
     httpd.serve_forever()
 
 
