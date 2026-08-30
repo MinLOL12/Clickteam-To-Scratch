@@ -18,8 +18,11 @@ def main(argv=None) -> int:
     ap.add_argument("-o", "--output", help="output .sb3 path (default: input basename + .sb3)")
     ap.add_argument("--report", help="write a JSON conversion report")
     ap.add_argument("--inspect", action="store_true", help="just print a JSON report of the parsed project")
-    ap.add_argument("--ctfak", help="path to the CTFAK CLI (CTFAK.Cli.exe) for EXE rebuilds")
-    ap.add_argument("--ctfak-status", action="store_true", help="show whether CTFAK can be found, then exit")
+    ap.add_argument("--ctfak",
+                    help="optional advanced fallback: path to CTFAK.Cli.exe. "
+                         "EXE conversion works without it.")
+    ap.add_argument("--ctfak-status", action="store_true",
+                    help="show whether the optional CTFAK fallback is available, then exit")
     ap.add_argument("--pack-dump", metavar="DIR",
                     help="for .exe input: dump the built-in pack files into DIR (no CTFAK needed)")
     ap.add_argument("--pack-info", action="store_true",
@@ -59,6 +62,23 @@ def main(argv=None) -> int:
         return 0
 
     if args.inspect:
+        lower = args.input.lower()
+        if lower.endswith((".exe", ".ccn", ".apk", ".dat", ".bin")):
+            from cts2 import converter
+
+            with open(args.input, "rb") as fh:
+                data = fh.read()
+            notes: list = []
+            mfa = converter._exe_to_mfa_builtin(args.input, data, notes)
+            if mfa is None:
+                print(
+                    f"Error: could not read '{args.input}' with the built-in "
+                    "readers", file=sys.stderr)
+                return 1
+            report = mfa.report()
+            report["notes"] = notes
+            print(json.dumps(report, indent=2))
+            return 0
         mfa = load_mfa(args.input)
         print(json.dumps(mfa.report(), indent=2))
         return 0

@@ -5,15 +5,15 @@ A **desktop app (Electron)**, a CLI and a local web app that read
 `.exe` files — and export them as a real **Scratch 3 / PenguinMod `.sb3`**
 project.
 
-It does **not** require the Clickteam editor. The Python converter is pure
-standard library (Pillow and lz4 are optional speed-ups); the desktop app
-provisions its own portable Python on first run — **no pip, no venv, no
-system Python**.
+It does **not** require the Clickteam editor, **CTFAK**, or any other
+external tool. The Python converter is pure standard library (Pillow and lz4
+are optional speed-ups); the desktop app provisions its own portable Python
+on first run — **no pip, no venv, no system Python**.
 
 ```
-input.mfa  ──>  [ cts2 ]  ────────────────────────────>  output.sb3
-input.exe  ──>  [ cts2 built-in pack extractor ]  ────>  output.sb3   (when the pack holds a raw MFA)
-input.exe  ──>  [ CTFAK CLI (auto-located) ]  ──>  .mfa  ──>  output.sb3   (full rebuild)
+input.mfa  ──>  [ cts2 ]  ────────────────────────────────>  output.sb3
+input.exe  ──>  [ cts2 built-in pack extractor          ]  ──>  output.sb3   (when the pack holds a raw MFA)
+input.exe  ──>  [ cts2 native PAME/PAMU game-data reader ]  ──>  output.sb3   (full rebuild)
 ```
 
 ## It is not "impossible" — here is the route
@@ -35,11 +35,14 @@ input.exe  ──>  [ CTFAK CLI (auto-located) ]  ──>  .mfa  ──>  output
   files are recovered with a pure-stdlib extractor (`cts2/exe_pack.py`).
   When the pack contains a raw MFA the whole conversion runs with **zero
   external tools**.
-- **EXE (full rebuild)**: for EXEs whose game data is only re-serializable by
-  the community **CTFAK** CLI, this tool auto-locates `CTFAK.Cli.exe`
-  (user selection, `CTFAK_BIN`, bundled `app/resources/ctfak/`, PATH, common
-  build locations) and drives it headlessly with the documented
-  `-path / -parameters / -tool "Export as MFA" / -closeonfinish` arguments.
+- **EXE (full rebuild)**: for EXEs whose game data lives in the PAME/PAMU
+  region (most Fusion 2.5 games), `cts2/gamedata.py` reads that region
+  **directly** — app header, global values, frame items with animations,
+  alterable values and movements, every frame's layers/instances, and the
+  image/sound/font banks — including the modified-RC4 chunk encryption used
+  by newer builds. Still **zero external tools**. CTFAK is not required and
+  not invoked; it remains only an optional last-resort fallback that you can
+  point at with `--ctfak` if you happen to have it.
 
 ## Install
 
@@ -55,7 +58,7 @@ python3 -m pip install -r requirements.txt   # optional: Pillow + lz4
 # convert an MFA project
 python3 cts2_cli.py game.mfa -o game.sb3
 
-# convert a Fusion 2.5 EXE (built-in pack extractor first, CTFAK if needed)
+# convert a Fusion 2.5 EXE (built-in readers; nothing to install)
 python3 cts2_cli.py game.exe -o game.sb3
 
 # inspect the parsed structure as JSON (great for debugging / porting events)
@@ -65,7 +68,8 @@ python3 cts2_cli.py --inspect game.mfa > report.json
 python3 cts2_cli.py game.exe --pack-info
 python3 cts2_cli.py game.exe --pack-dump dumps/
 
-# point at a CTFAK build explicitly (or use CTFAK_BIN)
+# optional: advanced fallback for exotic builds (.ccn/.apk/.dat/.bin,
+# protected EXEs) — only if you already have CTFAK
 python3 cts2_cli.py --ctfak /path/to/CTFAK.Cli.exe game.exe -o game.sb3
 python3 cts2_cli.py --ctfak-status
 
@@ -98,29 +102,25 @@ What "no Python setup" means in practice:
 - On dev machines the app happily falls back to a system `python3`
   (Linux/macOS have no official embeddable build).
 
-**EXE support in the app**: the built-in pack extractor runs first (no
-external tool). If a full rebuild is required, the app shows a **CTFAK**
-status card — it auto-detects an existing `CTFAK.Cli.exe` and also lets you
-point at one with a single click; the setup card lists the exact steps
-(.NET 6 Desktop Runtime → CTFAK 2.0 → requirements zip). CTFAK itself is a
-Windows-only third-party .NET tool, so it can only be *located/chosen*, not
-created — everything else is automatic.
+**EXE support in the app**: EXEs are converted by the built-in readers
+(pack extractor first, then the native PAME/PAMU game-data reader) — no
+external tools. An optional "CTFAK fallback" card exists only for exotic
+cases; you can ignore it.
 
-### EXE support (CLI)
+### Optional CTFAK fallback (advanced)
 
-EXEs whose pack does not contain a raw MFA need the community CTFAK CLI:
+For `.ccn` / `.apk` / `.dat` / `.bin` inputs, or rare EXE builds the
+built-in reader cannot handle, the tool can drive the community
+[CTFAK](https://github.com/CTFAK/CTFAK2.0) CLI if you provide it
+(a Windows-only third-party .NET tool). The converter invokes CTFAK 2.0
+headlessly (`-path … -parameters "" -tool "Export as MFA" -closeonfinish`)
+and scans CTFAK's own directory for the freshly written `.mfa`. Nothing is
+downloaded or bundled; you must obtain CTFAK yourself:
 
 ```bash
-export CTFAK_BIN=/path/to/CTFAK.Cli.exe
-python3 cts2_cli.py game.exe -o game.sb3
+export CTFAK_BIN=/path/to/CTFAK.Cli.exe     # or pass --ctfak PATH
+python3 cts2_cli.py game.ccn -o game.sb3
 ```
-
-The converter invokes CTFAK 2.0 headlessly
-(`-path … -parameters "" -tool "Export as MFA" -closeonfinish`) and scans
-CTFAK's own directory (it force-chdirs there) for the freshly written `.mfa`.
-If CTFAK is not found the tool tells you exactly which binary to provide and
-how to get it. You only need it for that one step; `.mfa` conversion and
-pack-resident EXE conversion never need it.
 
 ## Supported today
 
@@ -135,9 +135,10 @@ pack-resident EXE conversion never need it.
 | Event groups, conditions/actions/parameters/expressions | ✅ parsed & reported |
 | Event → Scratch block transpiler | 🔶 subset; rest visible in **Logic-Notes** |
 | `.exe` built-in pack extraction (PE + PackData + zlib, stdlib only) | ✅ |
-| `.exe` full rebuild (PAME/PAMU game data → MFA) | 🔶 requires CTFAK (auto-located) |
-| `.ccn` / `.apk` / `.dat` / `.bin` front-ends | 🔶 requires CTFAK |
-| Fusion 3 / encrypted builds | not yet |
+| `.exe` full rebuild from PAME/PAMU game data (objects, animations, frames, banks, decryption) | ✅ built-in — **no CTFAK** |
+| `.exe` compiled event programs | 🔶 reported (size/byte counts); not decoded into blocks |
+| `.ccn` / `.apk` / `.dat` / `.bin` front-ends | 🔶 optional CTFAK fallback only |
+| MMF 1.5 / CNC builds, Fusion 3, encrypted builds | not yet |
 | Desktop app: portable Python auto-provisioning, no pip/venv | ✅ (Windows embeddable / system python3 elsewhere) |
 
 ## Web UI
@@ -150,7 +151,7 @@ localhost configuration.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v   # converter + EXE pack extractor + CTFAK
+python3 -m unittest discover -s tests -v   # converter + EXE pack + game data
 cd app && npm test                          # desktop app (pure Node, no Electron needed)
 ```
 
@@ -165,13 +166,14 @@ located, never shipped).
 
 ## Credits / format research
 
-The MFA binary layouts used here are the same facts documented by the
-community tools:
+The binary layouts used here are the same facts documented by the community
+tools:
 
 - [CTFAK / CTFAK — Clickteam Fusion Army Knife](https://github.com/CTFAK/CTFAK)
 - [CTFAK 2.0 — Clickteam Fusion decompiler (archived)](https://github.com/CTFAK/CTFAK2.0)
   — the PE/`.extra` section + PackData + PAME/PAMU game-data layout followed
-  by `cts2/exe_pack.py` comes from its reader implementation.
+  by `cts2/exe_pack.py` and `cts2/gamedata.py` comes from its reader
+  implementation.
 - [Anaconda — Clickteam Fusion decompiler](https://github.com/fnmwolf/Anaconda)
 
 `cts2/` is an independent Python implementation; no CTFAK/Anaconda source code

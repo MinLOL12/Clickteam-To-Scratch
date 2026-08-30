@@ -21,9 +21,11 @@ code{background:#26304d;padding:.1rem .35rem;border-radius:4px}
 </style></head><body>
 <h1>Clickteam Fusion (MMF2 / Fusion 2.5) → Scratch / PenguinMod</h1>
 <div class="card">
-<p>Upload a <code>.mfa</code> project &mdash; or a <code>.exe</code>. Fusion 2.5
-EXEs are unpacked by the built-in extractor; when a full rebuild is needed the
-server-side <code>CTFAK</code> CLI is used (set <code>CTFAK_BIN</code>).</p>
+<p>Upload a <code>.mfa</code> project &mdash; or a <code>.exe</code>. Everything
+runs on the built-in readers: the EXE pack extractor and the native PAME/PAMU
+game-data reader. <strong>No CTFAK or any other external tool is needed.</strong>
+(<code>.ccn/.apk/.dat/.bin</code> need the optional <code>CTFAK_BIN</code>
+fallback.)</p>
 <form method="post" enctype="multipart/form-data" id="f">
 <input type="file" name="file" id="file" accept=".mfa,.exe,.ccn,.apk,.dat,.bin">
 <button type="submit">Convert to .sb3</button>

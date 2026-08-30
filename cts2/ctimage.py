@@ -109,9 +109,9 @@ def read_alpha(data: bytes, width: int, height: int, pos: int) -> bytes:
 def decode_bmp(width: int, height: int, mode: int, flags: int, body: bytes, transparent=None):
     """Return PNG bytes for a Clickteam bitmap.
 
-    flags bits: bit0 RLE, bit1 RLEW, bit2 RLET, bit3 LZX, bit4 Alpha.
-    Only the uncompressed modes (4,6,7,16) are decoded; compressed images are
-    skipped gracefully.
+    flags bits: bit0 RLE, bit1 RLEW, bit2 RLET, bit3 LZX, bit4 Alpha,
+    bit7 RGBA.  Only the uncompressed modes (4, 6, 7, 8, 16) are decoded;
+    compressed images are skipped gracefully.
     """
     if (flags & 0x0F) != 0:
         return None
@@ -122,6 +122,26 @@ def decode_bmp(width: int, height: int, mode: int, flags: int, body: bytes, tran
         rgba, used = read_15bpp(body, width, height)
     elif mode == 7:
         rgba, used = read_16bpp(body, width, height)
+    elif mode == 8:
+        # Fusion 2.5+ EXEs: 32 bits per pixel, 8 bits per channel (BGRA).
+        rgba, used = read_32bpp(body, width, height)
+        if flags & 0x80:  # RGBA flag: the 4th byte is the alpha channel
+            return encode_png(width, height, rgba)
+        if not (flags & 0x10):  # no separate alpha plane: use transparent color
+            arr = bytearray(rgba)
+            if transparent is not None:
+                tr, tg, tb, ta = transparent
+                for i in range(width * height):
+                    j = i * 4
+                    if arr[j] == tr and arr[j + 1] == tg and arr[j + 2] == tb:
+                        arr[j + 3] = ta
+                    else:
+                        arr[j + 3] = 255
+            else:
+                for i in range(width * height):
+                    arr[i * 4 + 3] = 255
+            return encode_png(width, height, bytes(arr))
+        # Alpha flag without RGBA: a separate alpha plane follows the pixels.
     elif mode == 16:
         rgba, used = read_32bpp(body, width, height)
     elif mode == 0:

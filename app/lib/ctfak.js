@@ -1,5 +1,7 @@
 /**
- * Locate the community CTFAK CLI (needed for the full EXE -> MFA rebuild).
+ * Locate the community CTFAK CLI. CTFAK is strictly OPTIONAL: the
+ * built-in Python readers convert .mfa files and Fusion 2.5 EXEs without
+ * it; CTFAK only serves as an advanced fallback.
  * Electron-free and unit-testable.
  *
  * Search order:
@@ -159,10 +161,12 @@ function saveCtfakSelection(userDataDir, ctfakPath) {
 
 function ctfakSetupHelp() {
   return [
-    'CTFAK is only needed for the full EXE -> MFA rebuild. The app converts',
-    'plain .mfa files (and EXEs whose pack contains a raw MFA) without it.',
+    'CTFAK is OPTIONAL. Plain .mfa files and Fusion 2.5 EXEs are',
+    'converted by the built-in readers (EXE pack extractor + native',
+    'PAME/PAMU game-data reader). You only need CTFAK as an advanced',
+    'fallback for exotic builds or .ccn/.apk/.dat/.bin inputs.',
     '',
-    'To enable CTFAK:',
+    'If you want the optional fallback:',
     '  1. Install the .NET 6 Desktop Runtime (x64):',
     '     https://dotnet.microsoft.com/en-us/download/dotnet/6.0',
     '  2. Get CTFAK 2.0: https://github.com/CTFAK/CTFAK2.0',
