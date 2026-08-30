@@ -111,7 +111,7 @@ class TargetBuilder:
         self.costumes: List[dict] = []
         self.sounds: List[dict] = []
         self.comments: List[dict] = {}
-        self.current_costume = 1
+        self.current_costume = 0
 
     def add_variable(self, var_id: str, name: str, value: Any = 0) -> str:
         self.variables[var_id] = [name, value]
@@ -122,7 +122,7 @@ class TargetBuilder:
         self.broadcasts[bid] = [name, bid]
         return bid
 
-    def add_costume(self, png: bytes, name: str) -> str:
+    def add_costume(self, png: bytes, name: str, cx: int = 0, cy: int = 0) -> str:
         data_id = _asset_name(png, "png")
         self.costumes.append(
             {
@@ -131,13 +131,14 @@ class TargetBuilder:
                 "dataFormat": "png",
                 "assetId": data_id,
                 "md5ext": data_id,
-                "rotationCenterX": 0,
-                "rotationCenterY": 0,
+                "rotationCenterX": cx,
+                "rotationCenterY": cy,
             }
         )
         return data_id
 
-    def add_costume_from_svg(self, svg: bytes, name: str) -> str:
+    def add_costume_from_svg(self, svg: bytes, name: str,
+                             cx: int = 0, cy: int = 0) -> str:
         data_id = _asset_name(svg, "svg")
         self.costumes.append(
             {
@@ -146,8 +147,8 @@ class TargetBuilder:
                 "dataFormat": "svg",
                 "assetId": data_id,
                 "md5ext": data_id,
-                "rotationCenterX": 0,
-                "rotationCenterY": 0,
+                "rotationCenterX": cx,
+                "rotationCenterY": cy,
             }
         )
         return data_id
@@ -173,16 +174,15 @@ class TargetBuilder:
 
 
 def _event_notes_svg(mfa: MFA) -> Optional[bytes]:
+    from .transpile import describe_frame_events
+
     lines: List[str] = []
     for frame in mfa.frames:
-        for idx, group in enumerate(frame.event_groups[:30], start=1):
-            cond = ", ".join(
-                (f"cond({c.object_type},{c.num})" for c in group.conditions[:5])
-            )
-            act = ", ".join(
-                (f"act({a.object_type},{a.num})" for a in group.actions[:5])
-            )
-            lines.append(f"{frame.name} #{idx}: {cond} => {act}")
+        ev = describe_frame_events(frame)
+        if not ev:
+            continue
+        lines.append(f"── {frame.name} ──")
+        lines.extend(ev[:60])
     if not lines:
         return None
     esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -281,6 +281,27 @@ def build_project(mfa: MFA) -> tuple:
     return out.getvalue(), report
 
 
+def _placeholder_png(width: int, height: int, name: str) -> tuple:
+    """Return a visible placeholder (png, hotspot) for an undecodable image.
+
+    The Clickteam image bank may hold images whose pixel format the decoder
+    does not understand (compressed / exotic modes).  Rather than silently
+    dropping the object (which is what made Scratch show the "?" placeholder
+    costume), we render a labelled magenta box so the object still appears at
+    the correct position and the miss is reported.
+    """
+    w = max(int(width or 32), 1)
+    h = max(int(height or 32), 1)
+    svg = (
+        f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">'
+        f'<rect width="100%" height="100%" fill="#d80073"/>'
+        f'<rect x="1" y="1" width="{max(w - 2, 0)}" '
+        f'height="{max(h - 2, 0)}" fill="none" stroke="#7a0040"/>'
+        f'</svg>'
+    ).encode()
+    return svg, (0, 0)
+
+
 def _add_frame_sprites(mfa: MFA, frame: Frame, sprites: List[TargetBuilder],
                        assets: Dict[str, bytes], report: dict) -> None:
     seen: dict = {}
@@ -289,25 +310,40 @@ def _add_frame_sprites(mfa: MFA, frame: Frame, sprites: List[TargetBuilder],
         if item is None:
             continue
         visual = _item_image(mfa, item)
-        if visual is None:
-            report["warnings"].append(f"No image for object {item.name}")
-            continue
-        png = visual.png
-        if not png:
-            continue
+        png = visual.png if visual is not None else None
+        if png:
+            hotspot = (visual.hotspot_x, visual.hotspot_y)
+        else:
+            # Image missing or its pixel data did not decode.  Emit a visible
+            # placeholder instead of a blank / "?" costume.
+            ph, hotspot = _placeholder_png(
+                visual.width if visual else item.width,
+                visual.height if visual else item.height,
+                item.name)
+            report["warnings"].append(
+                f"Object {item.name}: image missing/undecodable; used a "
+                f"placeholder costume"
+            )
+            png = None
         src_item = item.handle
         if src_item in seen:
             sb = seen[src_item]
         else:
             sb = TargetBuilder(_sprite_name(frame, item))
-            asset = sb.add_costume(png, "costume1")
-            assets[asset] = png
-            # add rest of animations as costumes
-            for idx, h in enumerate(item.frames[1:], start=2):
-                img = mfa.images.get(h)
-                if img and img.png:
-                    a = sb.add_costume(img.png, f"costume{idx}")
-                    assets[a] = img.png
+            if png:
+                asset = sb.add_costume(png, "costume1", *hotspot)
+                assets[asset] = png
+                # add rest of animations as costumes
+                for idx, h in enumerate(item.frames[1:], start=2):
+                    img = mfa.images.get(h)
+                    if img and img.png:
+                        a = sb.add_costume(
+                            img.png, f"costume{idx}", img.hotspot_x,
+                            img.hotspot_y)
+                        assets[a] = img.png
+            else:
+                asset = sb.add_costume_from_svg(ph, "costume1", *hotspot)
+                assets[asset] = ph
             _add_sprite_scripts(sb, frame, inst, item, len(item.frames))
             seen[src_item] = sb
             sprites.append(sb)
@@ -338,14 +374,18 @@ def _add_sprite_scripts(sb: TargetBuilder, frame: Frame, inst: FrameInstance,
                         item: ObjectData, costumes: int) -> None:
     sx = inst.x - frame.size_x / 2
     sy = frame.size_y / 2 - inst.y
-    show_id = _nid()
-    sb.blocks[show_id] = _block("looks_show")
+    # Honour the Clickteam object's initial visibility: an instance that
+    # starts hidden must stay hidden (and appears only when the converted
+    # events call `show`), instead of being force-shown at green flag.
+    vis_id = _nid()
+    sb.blocks[vis_id] = _block(
+        "looks_show" if getattr(inst, "visible", True) else "looks_hide")
     gotoxy_id = _nid()
     sb.blocks[gotoxy_id] = _block(
-        "motion_gotoxy", next_id=show_id,
+        "motion_gotoxy", next_id=vis_id,
         inputs={"X": num(sx), "Y": num(sy)},
     )
-    sb.blocks[show_id]["parent"] = gotoxy_id
+    sb.blocks[vis_id]["parent"] = gotoxy_id
     hat = script_when_green_flag(sb.blocks, gotoxy_id)
     sb.blocks[gotoxy_id]["parent"] = hat
     # animate if multiple costumes
@@ -358,6 +398,6 @@ def _add_sprite_scripts(sb: TargetBuilder, frame: Frame, inst: FrameInstance,
             inputs={"SUBSTACK": ref(nxt)},
         )
         sb.blocks[nxt]["parent"] = loop
-        sb.blocks[show_id]["next"] = loop
-        sb.blocks[loop]["parent"] = show_id
+        sb.blocks[vis_id]["next"] = loop
+        sb.blocks[loop]["parent"] = vis_id
     return hat
