@@ -120,8 +120,11 @@ What "no Python setup" means in practice:
 | Sound bank extraction | ✅ parsed (WAV payload kept) |
 | Stage + sprites + PNG costumes + green-flag positioning | ✅ generated |
 | Costume animation loops | ✅ generated |
+| Initial per-object visibility (hide/show on green flag) | ✅ honored |
+| Images that fail to decode | ✅ get a visible labelled placeholder instead of being dropped / "?" |
 | Event groups, conditions/actions/parameters/expressions | ✅ parsed & reported |
-| Event → Scratch block transpiler | 🔶 subset; rest visible in **Logic-Notes** |
+| Event → readable notes (object names resolved) | ✅ visible in **Logic-Notes** |
+| Event → Scratch block transpiler | 🔶 only the verified subset is mapped to blocks; the rest is readable **Logic-Notes** |
 | `.exe` compiled event programs | 🔶 reported (size/byte counts); not decoded into blocks |
 | `.ccn` / `.apk` / `.bin` front-ends | 🔶 optional CTFAK fallback only |
 | MMF 1.5 / CNC builds, Fusion 3, encrypted builds | not yet |

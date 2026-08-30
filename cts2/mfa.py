@@ -111,6 +111,12 @@ class FrameInstance:
     parent_type: int
     item_handle: int
     parent_handle: int = 0
+    visible: bool = True
+
+
+# Clickteam instance-flag bit that means "hidden when the frame starts".
+# (Bit 0 of the MFA frame-instance flags.)
+INSTANCE_FLAG_HIDDEN = 0x0001
 
 
 @dataclass
@@ -1042,7 +1048,9 @@ def _read_frame(r: Reader) -> Frame:
         pt = r.u32()
         ih = r.u32()
         ph = r.i32()
-        frame.instances.append(FrameInstance(x, y, layer, h, fl, pt, ih, ph))
+        frame.instances.append(FrameInstance(
+            x, y, layer, h, fl, pt, ih, ph,
+            visible=not (fl & INSTANCE_FLAG_HIDDEN)))
     frame.event_groups = _read_frame_events(r)
     _skip_chunklist(r)
     return frame

@@ -7,9 +7,14 @@ import unittest
 import zipfile
 
 from cts2.converter import convert_file
-from cts2.mfa import load_mfa
+from cts2.mfa import Frame, FrameInstance, load_mfa
 from cts2.png import encode_png
-from cts2.scratch import build_project
+from cts2.scratch import _add_sprite_scripts, TargetBuilder, build_project
+from tests.exebuilder import (build_exe, build_game_data, frame_chunk,
+                              frame_instance, image_item_normal,
+                              object_common_25, object_common_284,
+                              object_names_25, object_props_25,
+                              object_header_25)
 
 HERE = os.path.dirname(__file__)
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -84,6 +89,61 @@ class TestConverter(unittest.TestCase):
     def test_png_encoder(self):
         png = encode_png(2, 2, bytes([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255]))
         self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def _undecodable_exe(self) -> bytes:
+        # A sprite whose image carries the RLE flag (0x01); decode_bmp cannot
+        # decode it, so png stays None.  The sprite must still exist with a
+        # visible placeholder costume instead of being skipped / showing "?".
+        pixels = bytes([0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255])
+        img = image_item_normal(0, 2, 2, pixels, mode=4, flags=0x01)
+        game = build_game_data(
+            name="My Game", unicode=True, build=294, images=[img],
+            objects_25=[object_common_25(frames_per_anim=((0,),))],
+            object_names=("Player",),
+            frames=[frame_chunk(name="Frame 1",
+                                instances=(frame_instance(0, 0, 320, 240),),
+                                layers=(("Layer 1", 1.0, 1.0),))],
+            frame_handles=(0,),
+        )
+        return build_exe(game, pack_files=[], unicode=True)
+
+    def test_undecodable_image_gets_placeholder_costume(self):
+        import io
+        import json
+        import tempfile
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.exe")
+            with open(path, "wb") as fh:
+                fh.write(self._undecodable_exe())
+            r = convert_file(path, os.path.join(tmp, "out.sb3"))
+        self.assertTrue(any("placeholder" in w for w in r["report"]["warnings"]))
+        with zipfile.ZipFile(io.BytesIO(r["project"])) as z:
+            pj = json.loads(z.read("project.json"))
+            sprites = [t for t in pj["targets"] if not t["isStage"]]
+            player = [s for s in sprites if s["name"] == "Frame1-Player"]
+            self.assertEqual(len(player), 1)
+            self.assertEqual(len(player[0]["costumes"]), 1)
+            self.assertEqual(player[0]["costumes"][0]["dataFormat"], "svg")
+            self.assertIn(player[0]["costumes"][0]["md5ext"], z.namelist())
+            self.assertLess(player[0]["currentCostume"], len(player[0]["costumes"]))
+
+    def test_hidden_instance_emits_hide(self):
+        frame = Frame(0, "F", 640, 480, (0, 0, 0, 0), 0, 0, "")
+        hidden = FrameInstance(100, 100, 0, 0, 1, -1, 0, 0, visible=False)
+        sb = TargetBuilder("Player")
+        _add_sprite_scripts(sb, frame, hidden, None, 1)
+        ops = [b["opcode"] for b in sb.blocks.values()]
+        self.assertIn("looks_hide", ops)
+        self.assertNotIn("looks_show", ops)
+
+        visible = FrameInstance(100, 100, 0, 0, 1, -1, 0, 0, visible=True)
+        sb2 = TargetBuilder("Player")
+        _add_sprite_scripts(sb2, frame, visible, None, 1)
+        ops2 = [b["opcode"] for b in sb2.blocks.values()]
+        self.assertIn("looks_show", ops2)
+        self.assertNotIn("looks_hide", ops2)
 
 
 if __name__ == "__main__":
