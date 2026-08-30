@@ -1,0 +1,51 @@
+# electron-builder configuration for the Clickteam to Scratch desktop app.
+appId: dev.clickteamto.scratch
+productName: Clickteam to Scratch
+copyright: Copyright (c) 2026 Clickteam-To-Scratch
+
+directories:
+  output: ../dist
+  buildResources: build
+
+# What goes inside the app (asar)
+files:
+  - main.js
+  - preload.js
+  - lib/**/*
+  - renderer/**/*
+  - resources/**/*
+  - package.json
+
+# The Python converter lives next to the repo root; ship it as a resource so
+# the main process can stage it next to the portable Python at first run.
+extraResources:
+  - from: ../cts2
+    to: cts2
+  - from: ../cts2_cli.py
+    to: cts2_cli.py
+
+asar: true
+
+win:
+  target:
+    - nsis
+    - portable
+  # The CTFAK tool is Windows-only; Windows is the primary platform.
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+
+portable:
+  artifactName: ${name}-${version}-portable.${ext}
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+
+linux:
+  category: Development
+  target:
+    - AppImage

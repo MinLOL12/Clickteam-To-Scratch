@@ -21,15 +21,18 @@ code{background:#26304d;padding:.1rem .35rem;border-radius:4px}
 </style></head><body>
 <h1>Clickteam Fusion (MMF2 / Fusion 2.5) → Scratch / PenguinMod</h1>
 <div class="card">
-<p>Upload a <code>.mfa</code> project file. EXE files require the community
-<code>CTFAK</code> CLI installed locally with <code>CTFAK_BIN</code> set.</p>
+<p>Upload a <code>.mfa</code> project &mdash; or a <code>.exe</code>. Fusion 2.5
+EXEs are unpacked by the built-in extractor; when a full rebuild is needed the
+server-side <code>CTFAK</code> CLI is used (set <code>CTFAK_BIN</code>).</p>
 <form method="post" enctype="multipart/form-data" id="f">
-<input type="file" name="file" id="file">
+<input type="file" name="file" id="file" accept=".mfa,.exe,.ccn,.apk,.dat,.bin">
 <button type="submit">Convert to .sb3</button>
 </form>
+<p>For a no-setup desktop experience see the <code>app/</code> Electron app
+(<code>npm start</code> in <code>app/</code>).</p>
 </div>
 <div class="card"><h2>How it works</h2>
-<p>MFA files are parsed locally in your browser-side process: frames, frame
+<p>MFA files are parsed locally in the server process: frames, frame
 items/instances, image &amp; sound banks, globals and the event tree are read,
 then a real Scratch 3 / PenguinMod <code>.sb3</code> project is generated with
 sprites, costumes, positions and starter scripts.</p>

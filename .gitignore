@@ -5,3 +5,10 @@ venv/
 .pytest_cache/
 *.sb3
 /reports/
+
+# desktop app
+app/node_modules/
+dist/
+# pre-bundled runtimes & CTFAK builds are machine-local
+app/resources/runtime/
+app/resources/ctfak/

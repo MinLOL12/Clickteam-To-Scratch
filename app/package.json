@@ -1,0 +1,22 @@
+{
+  "name": "clickteam-to-scratch",
+  "productName": "Clickteam to Scratch",
+  "version": "0.2.0",
+  "description": "Desktop app: convert Clickteam Fusion .mfa / .exe projects to Scratch 3 / PenguinMod .sb3 - no Python setup required",
+  "main": "main.js",
+  "author": "Clickteam-To-Scratch",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3"
+  }
+}
