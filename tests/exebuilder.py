@@ -83,6 +83,13 @@ def wstring(s: str) -> bytes:
     return s.encode("utf-16-le") + b"\x00\x00"
 
 
+def game_string(s: str, unicode: bool = True) -> bytes:
+    """Null-terminated string in the game's own encoding (PAME = ASCII)."""
+    if unicode:
+        return wstring(s)
+    return s.encode("latin-1", "replace") + b"\x00"
+
+
 def app_header_chunk(width=640, height=480, score=0, lives=3,
                      frames=1, rate=60) -> bytes:
     data = bytearray()
@@ -224,21 +231,94 @@ def object_common_old(frames_per_anim=((0,),), values=(), strings=()) -> bytes:
     return bytes(block)
 
 
+def object_common_284(frames_per_anim=((0,),), values=(), strings=(),
+                      check0=False) -> bytes:
+    """ObjectCommon in the MMF2 build-284 (FNaF 1 era) layout.
+
+    ``check0=True`` selects the variant field order CTFAK treats specially
+    for build 284 (counter offset first, 32-bit version).
+    """
+    header = bytearray()
+    header += struct.pack("<i", 0)          # size (patched below)
+    if check0:
+        header += struct.pack("<h", 0)      # counter offset
+        header += struct.pack("<i", 0)      # version (0 -> check == 0)
+        header += struct.pack("<hh", 0, 0)  # movements offset, extension
+        anim_at = len(header)
+        header += struct.pack("<h", 0)      # animations offset
+    else:
+        anim_at = len(header)
+        header += struct.pack("<hh", 0, 0)  # animations offset, movements
+        header += struct.pack("<i", 1)      # version (non-zero -> check != 0)
+        header += struct.pack("<hh", 0, 0)  # extension, counter offsets
+    header += struct.pack("<Hh", 0, 0)      # flags, marker
+    header += b"\x00" * 16                  # 8 qualifiers
+    header += struct.pack("<hhh", 0, 0, 0)  # system, values, strings offsets
+    header += struct.pack("<HH", 0, 0)      # new flags, preferences
+    header += b"SPRX"                       # identifier (4 bytes)
+    header += b"\xff\xff\xff\xff"           # background color
+    header += struct.pack("<II", 0, 0)      # fade in/out offsets
+    header_len = len(header)
+
+    anim = _animations_block(frames_per_anim)
+    values_block = struct.pack("<h", len(values))
+    values_block += b"".join(struct.pack("<i", v) for v in values)
+    values_block += struct.pack("<i", 0)
+    strings_block = struct.pack("<h", len(strings))
+    strings_block += b"".join(wstring(s) for s in strings)
+
+    anim_off = header_len
+    values_off = header_len + len(anim)
+    strings_off = values_off + len(values_block)
+    struct.pack_into("<h", header, anim_at, anim_off)
+    struct.pack_into("<h", header, 38, values_off)
+    struct.pack_into("<h", header, 40, strings_off)
+
+    block = header + anim + values_block + strings_block
+    struct.pack_into("<i", block, 0, len(block))
+    return bytes(block)
+
+
 # -- old-style chunked frame items (chunks 8745/8767) -----------------------
 
-def object_info_header(handle=0, object_type=2, flags=0) -> bytes:
+def object_info_header_payload(handle=0, object_type=2, flags=0) -> bytes:
     data = struct.pack("<hhh", handle, object_type, flags) + b"\x00\x00"
     data += b"\x01" + b"\x00" + b"\x00\x00" + b"\x00" + b"\x00\x00\x00"
-    return chunk(17476, data)
+    return data
 
 
-def frame_items_old(objects) -> bytes:
-    """objects: list of (handle, type, name, props_bytes)."""
+def object_info_header(handle=0, object_type=2, flags=0) -> bytes:
+    return chunk(17476, object_info_header_payload(handle, object_type, flags))
+
+
+def zlib_wrap(payload: bytes):
+    """Inner-chunk transform: zlib-compress the payload (chunk flag 1)."""
+    comp = zlib.compress(payload)
+    return 1, struct.pack("<II", len(payload), len(comp)) + comp
+
+
+def frame_items_old(objects, compress=False, transform=None,
+                    unicode=True) -> bytes:
+    """objects: list of (handle, type, name, props_bytes).
+
+    ``transform`` maps payload -> (flags, stored_bytes) and is applied to
+    every inner ObjectInfo chunk; real MMF2 games store these chunks
+    compressed and/or encrypted.  ``compress=True`` is shorthand for
+    ``transform=zlib_wrap``.
+    """
+    if compress:
+        transform = zlib_wrap
     data = struct.pack("<i", len(objects))
     for handle, object_type, name, props in objects:
-        data += object_info_header(handle, object_type)
-        data += chunk(17477, wstring(name))
-        data += chunk(17478, props)
+        for cid, payload in (
+                (17476, object_info_header_payload(handle, object_type)),
+                (17477, game_string(name, unicode)),
+                (17478, props)):
+            if transform is None:
+                data += chunk(cid, payload)
+            else:
+                flags, stored = transform(payload)
+                data += struct.pack("<hhi", cid, flags, len(stored)) + stored
         data += last_chunk()
     return chunk(8745, data)
 
@@ -313,32 +393,46 @@ def frame_instance(handle=0, object_info=0, x=320, y=240, parent_type=0,
 
 
 def frame_data(name="Frame 1", width=640, height=480, instances=(),
-               layers=(), events=b"") -> bytes:
-    """Raw nested frame chunks (without the outer 13107 wrapper)."""
+               layers=(), events=b"", transform=None, unicode=True) -> bytes:
+    """Raw nested frame chunks (without the outer 13107 wrapper).
+
+    ``transform`` maps payload -> (flags, stored_bytes) and is applied to
+    every inner chunk; real games compress and/or encrypt these payloads.
+    """
+    def put(cid, payload):
+        if transform is None:
+            return chunk(cid, payload)
+        flags, stored = transform(payload)
+        return struct.pack("<hhi", cid, flags, len(stored)) + stored
+
     data = b""
     hdr = struct.pack("<ii", width, height)
     hdr += b"\x00\x00\x00\x00"            # background
     hdr += struct.pack("<I", 0)           # flags
-    data += chunk(13108, hdr)
-    data += chunk(13109, wstring(name))
+    data += put(13108, hdr)
+    data += put(13109, game_string(name, unicode))
     inst = struct.pack("<i", len(instances))
     inst += b"".join(instances)
-    data += chunk(13112, inst)
+    data += put(13112, inst)
     if events:
-        data += chunk(13117, events)
+        data += put(13117, events)
     lay = struct.pack("<I", len(layers))
     for lname, xc, yc in layers:
         lay += struct.pack("<I", 0) + struct.pack("<ff", xc, yc)
-        lay += struct.pack("<ii", 0, 0) + wstring(lname)
-    data += chunk(13121, lay)
+        lay += struct.pack("<ii", 0, 0) + game_string(lname, unicode)
+    data += put(13121, lay)
     data += last_chunk()
     return data
 
 
 def frame_chunk(name="Frame 1", width=640, height=480, instances=(),
-                layers=(), events=b"") -> bytes:
+                layers=(), events=b"", compress=False, transform=None,
+                unicode=True) -> bytes:
+    if compress:
+        transform = zlib_wrap
     return chunk(13107, frame_data(name, width, height, instances, layers,
-                                   events))
+                                   events, transform=transform,
+                                   unicode=unicode))
 
 
 # -- whole game data / exe --------------------------------------------------
@@ -350,12 +444,11 @@ def build_game_data(name="My Game", unicode=True, build=294, images=(),
     header = (b"PAMU" if unicode else b"PAME")
     header += struct.pack("<HHii", 0x302, 0, 2, build)
     parts = [app_header_chunk(frames=len(frames) or len(frame_handles))]
-    parts.append(chunk(8740, wstring(name) if unicode
-                       else name.encode("latin-1") + b"\x00"))
-    parts.append(chunk(8741, wstring("Tester")))
-    parts.append(chunk(8763, wstring("(c) tests")))
-    parts.append(chunk(8750, wstring("game.mfa")))
-    parts.append(chunk(8751, wstring("game.exe")))
+    parts.append(chunk(8740, game_string(name, unicode)))
+    parts.append(chunk(8741, game_string("Tester", unicode)))
+    parts.append(chunk(8763, game_string("(c) tests", unicode)))
+    parts.append(chunk(8750, game_string("game.mfa", unicode)))
+    parts.append(chunk(8751, game_string("game.exe", unicode)))
     parts.append(global_values_chunk((0, 3)))
     parts.append(global_strings_chunk(("Hello",)))
     if objects_25 is not None:
@@ -364,7 +457,7 @@ def build_game_data(name="My Game", unicode=True, build=294, images=(),
         parts.append(chunk(8788, object_names_25(object_names)))
         parts.append(chunk(8790, object_props_25(objects_25)))
     if old_objects is not None:
-        parts.append(frame_items_old(old_objects))
+        parts.append(frame_items_old(old_objects, unicode=unicode))
     parts.append(chunk(8747, b"".join(
         struct.pack("<h", h) for h in frame_handles)))
     parts.extend(frames)

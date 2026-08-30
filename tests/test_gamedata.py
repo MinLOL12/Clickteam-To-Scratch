@@ -33,6 +33,7 @@ try:  # tests/ on sys.path when running `unittest discover -s tests`
         image_item_normal,
         last_chunk,
         object_common_25,
+        object_common_284,
         object_common_old,
         pe_header,
         wstring,
@@ -52,6 +53,7 @@ except ImportError:  # running from the repo root
         image_item_normal,
         last_chunk,
         object_common_25,
+        object_common_284,
         object_common_old,
         pe_header,
         wstring,
@@ -235,6 +237,111 @@ class TestGameData(unittest.TestCase):
         obj = mfa.frames[0].items[0]
         self.assertEqual(obj.name, "Player")
         self.assertEqual(obj.frames, [0])
+
+    # -- MMF2-era builds (the FNaF 1 shape) ----------------------------------
+    #
+    # FNaF 1 is a PAME (ASCII, non-2.5+) MMF2 build 284 game.  Real games of
+    # that era zlib-compress and/or RC4-encrypt the sub-chunk payloads
+    # *inside* frames and object infos.  A reader that only handles top-level
+    # chunk flags parses the raw streams as garbage instances that all
+    # "reference missing objects", and the SB3 ends up as one empty sprite.
+
+    def test_old_style_compressed_inner_chunks(self):
+        props = object_common_284(frames_per_anim=((0,),))
+        game = build_game_data(
+            name="Five Nights at Freddy's",
+            unicode=False,
+            build=284,
+            images=[image_item_normal(0, 2, 2, _png_pixels_2x2(), build=284)],
+            old_objects=[(0, 2, "Freddy", props)],
+            frames=[frame_chunk(name="Menu",
+                                instances=(frame_instance(0, 0, 320, 240),),
+                                layers=(("Layer 1", 1.0, 1.0),),
+                                compress=True, unicode=False)],
+        )
+        exe = build_exe(game, unicode=False)
+        mfa, notes = self._load(exe)
+        self.assertEqual(len(mfa.frames), 1)
+        self.assertEqual(len(mfa.frames[0].items), 1)
+        obj = mfa.frames[0].items[0]
+        self.assertEqual(obj.name, "Freddy")
+        self.assertEqual(obj.frames, [0])
+        self.assertEqual(len(mfa.frames[0].instances), 1)
+        self.assertEqual(mfa.frames[0].name, "Menu")
+        self.assertFalse(any("missing object" in n for n in notes))
+
+    def test_old_style_encrypted_inner_chunks(self):
+        # Build 284 keys are derived (editor, name, copyright) — the
+        # pre-2.5 ordering — and the inner chunks are RC4-encrypted.
+        # The key strings must match what build_game_data embeds: its name,
+        # its copyright and its editor filename ("game.mfa").
+        name = "Five Nights at Freddy's"
+        copyright_ = "(c) tests"
+        editor = "game.mfa"
+        build = 284
+        # build 284 keys are derived (editor, name, copyright) — the
+        # pre-2.5 ordering.
+        key = gamedata._make_key(editor, name, copyright_)
+        table = gamedata._init_decryption_table(key)
+
+        def rc4_wrap(payload: bytes):
+            return 2, bytes(gamedata._transform_chunk(bytearray(payload),
+                                                      table))
+
+        props = object_common_284(frames_per_anim=((0,),))
+        game = build_game_data(
+            name=name,
+            unicode=False,
+            build=build,
+            images=[image_item_normal(0, 2, 2, _png_pixels_2x2(), build=build)],
+            old_objects=[(0, 2, "Freddy", props)],
+            frames=[frame_chunk(name="Menu",
+                                instances=(frame_instance(0, 0, 320, 240),),
+                                transform=rc4_wrap, unicode=False)],
+        )
+        exe = build_exe(game, unicode=False)
+        mfa, notes = self._load(exe)
+        self.assertEqual(len(mfa.frames[0].items), 1)
+        self.assertEqual(mfa.frames[0].items[0].name, "Freddy")
+        self.assertEqual(len(mfa.frames[0].instances), 1)
+        self.assertFalse(any("missing object" in n for n in notes))
+
+    def test_mmf2_exe_builds_sprites_sb3(self):
+        # End-to-end: an MMF2-shaped EXE must produce a sprite that carries
+        # a real PNG costume (not the empty "?" placeholder project).
+        props = object_common_284(frames_per_anim=((0, 1),))
+        game = build_game_data(
+            name="Five Nights at Freddy's",
+            unicode=False,
+            build=284,
+            images=[image_item_normal(0, 2, 2, _png_pixels_2x2(), build=284),
+                    image_item_normal(1, 2, 2, _png_pixels_2x2(), build=284)],
+            old_objects=[(0, 2, "Freddy", props)],
+            frames=[frame_chunk(name="Menu",
+                                instances=(frame_instance(0, 0, 320, 240),),
+                                compress=True, unicode=False)],
+        )
+        exe = build_exe(game, unicode=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "FiveNightsatFreddys.exe")
+            with open(path, "wb") as fh:
+                fh.write(exe)
+            result = convert_file(path, os.path.join(tmp, "out.sb3"))
+        report = result["report"]
+        self.assertFalse(any("missing object" in n for n in report["notes"]))
+        with zipfile.ZipFile(io.BytesIO(result["project"])) as zf:
+            project = json.loads(zf.read("project.json"))
+        sprites = [t for t in project["targets"] if not t["isStage"]]
+        freddy = [s for s in sprites if s["name"] == "Menu-Freddy"]
+        self.assertEqual(len(freddy), 1)
+        costumes = freddy[0]["costumes"]
+        self.assertEqual(len(costumes), 2)  # animation loop -> 2 costumes
+        for costume in costumes:
+            self.assertEqual(costume["dataFormat"], "png")
+            self.assertIn(costume["md5ext"], zf.namelist())
+        # every target's currentCostume must be a valid 0-based index
+        for target in project["targets"]:
+            self.assertLess(target["currentCostume"], len(target["costumes"]))
 
     def test_compressed_frame_chunk(self):
         frame = frame_data(instances=(frame_instance(),))
