@@ -22,8 +22,8 @@ def pe_header(section_name: bytes, raw_ptr: int, raw_size: int) -> bytes:
     struct.pack_into("<I", dos, 60, 0x40)  # e_lfanew
     pe = bytearray()
     pe += b"PE\x00\x00"
-    pe += struct.pack("<HHIIIHH", 0x14C, 1, 0, 0, 0, 96, 0x102)
-    pe += b"\x00" * (96 + 128)  # optional header + data directories
+    pe += struct.pack("<HHIIIHH", 0x14C, 1, 0, 0, 0, 224, 0x102)
+    pe += b"\x00" * 224  # SizeOfOptionalHeader (PE32 + 16 data directories)
     pe += section_name.ljust(8, b"\x00")
     pe += struct.pack("<IIII", 0, 0, raw_size, raw_ptr)
     pe += b"\x00" * 24

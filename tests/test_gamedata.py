@@ -340,6 +340,46 @@ class TestGameData(unittest.TestCase):
         self.assertEqual(gamedata.find_game_data_offset(exe_no_pack), 0x200)
         self.assertIsNone(gamedata.find_game_data_offset(b"MZ" + b"\x00" * 512))
 
+    def test_pe32plus_optional_header_still_converts(self):
+        # Real Fusion EXEs (FNaF included) use SizeOfOptionalHeader from
+        # the COFF header, which is not always 224.  A PE32+ 240-byte
+        # optional header used to make the overlay miss the game data.
+        game = build_game_data(
+            images=[image_item_normal(0, 2, 2, _png_pixels_2x2())],
+            objects_25=[object_common_25()],
+            object_names=("Player",),
+            frames=[frame_chunk(instances=(frame_instance(),))],
+        )
+        pack = build_pack([], unicode=True)
+        appended = pack + game
+        raw_ptr = 0x300
+        dos = bytearray(64)
+        dos[0:2] = b"MZ"
+        struct.pack_into("<I", dos, 60, 0x40)
+        pe = bytearray()
+        pe += b"PE\x00\x00"
+        pe += struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x102)
+        pe += b"\x00" * 240
+        pe += b".text".ljust(8, b"\x00")
+        pe += struct.pack("<IIII", 0, 0, len(appended), raw_ptr)
+        pe += b"\x00" * 24
+        exe = bytes(dos) + bytes(pe)
+        exe += b"\x00" * (raw_ptr - len(exe)) + appended
+        mfa, _notes = self._load(exe)
+        self.assertEqual(mfa.name, "My Game")
+
+    def test_padding_before_pame_is_scanned(self):
+        game = build_game_data(
+            images=[image_item_normal(0, 2, 2, _png_pixels_2x2())],
+            objects_25=[object_common_25()],
+            object_names=("Player",),
+            frames=[frame_chunk(instances=(frame_instance(),))],
+        )
+        padded = b"\x00" * 17 + game
+        exe = build_exe(padded)
+        mfa, _notes = self._load(exe)
+        self.assertEqual(mfa.name, "My Game")
+
     def test_unconvertible_exe_error_is_ctfak_free(self):
         # A file that is neither a readable pack nor game data must fail
         # WITHOUT demanding the CTFAK setup.
