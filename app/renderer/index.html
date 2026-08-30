@@ -50,15 +50,17 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
 <body>
 <header>
   <h1>Clickteam Fusion &rarr; Scratch / PenguinMod</h1>
-  <span class="sub">convert <code>.mfa</code> and <code>.exe</code> projects to <code>.sb3</code></span>
+  <span class="sub">drop a game <code>.exe</code> &rarr; get a <code>.sb3</code> &mdash; no <code>.mfa</code> needed</span>
 </header>
 <main>
   <div class="col">
     <div class="card">
       <h2>Convert</h2>
       <div class="drop" id="drop">
-        <p><strong>Drop .mfa / .exe files here</strong> or click to browse</p>
-        <p class="muted">Fusion 2.5 EXEs are read by the built-in game-data reader &mdash; no CTFAK or other external tools needed.</p>
+        <p><strong>Drop the game's .exe here</strong> or click to browse</p>
+        <p class="muted">The file you launch to play (e.g. <code>FiveNightsatFreddys.exe</code>) &mdash;
+        the whole game is read out of it by the built-in reader. No .mfa, no CTFAK, no Clickteam editor.
+        You can also drop an extracted game folder, or an .mfa project if you happen to have one.</p>
       </div>
       <div class="row" style="margin-top:12px">
         <button id="addBtn">Browse files&hellip;</button>

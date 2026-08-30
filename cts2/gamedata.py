@@ -1262,10 +1262,17 @@ def _read_object_block(r: Reader) -> bytes:
 def find_game_data_offset(data: bytes) -> Optional[int]:
     """Return the offset where the PAME/PAMU game data starts, if any.
 
+    A file may hold the game data in three shapes:
+
+    * a raw game-data file that *starts* with PAME/PAMU (offset 0),
+    * an EXE whose game data follows the PE sections directly,
+    * an EXE with a Fusion "pack" first, game data after the pack.
+
     Looks right after the PE executable (the ``.extra`` pointer / last
-    section end).  If a Fusion "pack" sits there, the game data starts
-    after it; if the game data starts directly, that offset is returned.
+    section end) in the latter two cases.
     """
+    if data[:4] in GAME_HEADERS:
+        return 0
     try:
         start = exe_pack.find_pack_start(data)
     except exe_pack.PackError:

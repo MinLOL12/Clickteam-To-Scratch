@@ -1,21 +1,35 @@
-"""High-level conversion: MFA/EXE -> Scratch/PenguinMod SB3."""
+"""High-level conversion: game .exe / .mfa / folder -> Scratch SB3.
+
+Routing is by *content*, not extension (see :mod:`cts2.detect`):
+
+1. ``MZ`` executable -> built-in pack extractor, then the native PAME/PAMU
+   game-data reader. This is the normal path: point the tool at the game's
+   ``.exe`` (e.g. ``FiveNightsatFreddys.exe``) — **no .mfa is ever needed**.
+2. ``PAME``/``PAMU`` at offset 0 -> raw game-data file, read directly.
+3. ``MFU2``/``MFA2`` -> a raw MFA project file.
+4. Anything else -> the readers are tried anyway; the optional CTFAK
+   fallback is used only if the user configured one.
+5. A *directory* input is scanned for the game automatically.
+"""
 from __future__ import annotations
 
 import json
 import os
 import tempfile
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from . import ctfak as ctfak_mod
-from . import exe_pack, gamedata
+from . import detect, exe_pack, gamedata
 from .mfa import MFA, load_mfa, load_mfa_bytes
 from .scratch import build_project
 
-# Extensions that are not .mfa; .exe is fully handled by the built-in
-# readers. Other formats (.ccn/.apk/.dat/.bin) only have the optional
-# CTFAK route.
+# Extensions that hint at game data; the content sniff decides, these only
+# order the folder scan and pick the friendliest error message.
 _EXE_LIKE = (".exe",)
 _CTFAK_ONLY_EXTS = (".ccn", ".apk", ".dat", ".bin")
+_FOLDER_HINT_EXTS = tuple(
+    dict.fromkeys(_EXE_LIKE + _CTFAK_ONLY_EXTS + (".app", ".pam", ".cca"))
+)
 
 
 def find_ctfak_binary(hint: Optional[str] = None) -> Optional[str]:
@@ -28,9 +42,49 @@ def exe_to_mfa(exe_path: str, ctfak: Optional[str] = None,
     return ctfak_mod.exe_to_mfa(exe_path, ctfak=ctfak, workdir=workdir)
 
 
+# --------------------------------------------------------------------------
+# folder input: find the game inside an extracted game directory
+# --------------------------------------------------------------------------
+
+def iter_folder_candidates(folder: str) -> List[str]:
+    """Return plausible game files in ``folder``, most likely first.
+
+    Order: executables first (largest first), then other data-ish files
+    (largest first).  Extensions only *order* the list; whether a file is
+    actually readable is decided later by the content sniff.
+    """
+    scored: List[Tuple[Tuple[int, int], str]] = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for fn in files:
+            path = os.path.join(root, fn)
+            try:
+                size = os.path.getsize(path)
+            except OSError:  # pragma: no cover - unreadable entry
+                continue
+            ext = os.path.splitext(fn)[1].lower()
+            is_exe = 1 if ext in _EXE_LIKE else 0
+            hint = 1 if ext in _FOLDER_HINT_EXTS else 0
+            if not is_exe and not hint:
+                continue
+            scored.append(((is_exe, size, hint), path))
+    scored.sort(reverse=True)
+    return [path for _score, path in scored]
+
+
+def find_game_in_folder(folder: str) -> Optional[str]:
+    """Return the single most likely game file inside ``folder``."""
+    candidates = iter_folder_candidates(folder)
+    return candidates[0] if candidates else None
+
+
+# --------------------------------------------------------------------------
+# loading (content-based)
+# --------------------------------------------------------------------------
+
 def _exe_to_mfa_builtin(exe_path: str, data: bytes,
                         notes: list) -> Optional[MFA]:
-    """Fast path: recover the MFA using only the built-in readers.
+    """Fast path: recover the game using only the built-in readers.
 
     1. Raw MFA inside the EXE pack, or
     2. the native PAME/PAMU game-data reader (full rebuild, no tools).
@@ -62,53 +116,120 @@ def _exe_to_mfa_builtin(exe_path: str, data: bytes,
 def _ctfak_unavailable_message(input_path: str) -> str:
     name = os.path.basename(input_path)
     return (
-        f"Could not convert '{name}' with the built-in readers. Plain .mfa "
-        "files, and Fusion 2.5 EXEs whose pack or game data is readable, "
-        "convert without any external tools. This file needs the optional "
-        "CTFAK fallback (advanced builds only): pass --ctfak "
-        "/path/to/CTFAK.Cli.exe, or set CTFAK_BIN."
+        f"Could not convert '{name}' with the built-in readers. A Fusion "
+        "2.5 game's .exe — the file you launch, e.g. "
+        "FiveNightsatFreddys.exe — converts on its own; no .mfa is ever "
+        "needed. Plain .mfa project files work too. This particular file "
+        "needs the optional CTFAK fallback (advanced builds only): pass "
+        "--ctfak /path/to/CTFAK.Cli.exe, or set CTFAK_BIN."
     )
 
 
-def _load_mfa_from_any(input_path: str, ctfak_hint: Optional[str]) -> tuple:
-    """Return (mfa, notes). Built-in readers first; CTFAK is optional."""
-    lower = input_path.lower()
-    notes = []
-    if lower.endswith(_EXE_LIKE):
-        with open(input_path, "rb") as fh:
-            data = fh.read()
-        mfa = _exe_to_mfa_builtin(input_path, data, notes)
+def _unknown_input_message(input_path: str) -> str:
+    name = os.path.basename(input_path)
+    return (
+        f"'{name}' is not a file the built-in readers recognise. Point the "
+        "tool at the game's .exe (the file you launch to play) — the whole "
+        "game is read out of it and no .mfa file is needed. A plain .mfa "
+        "project file also works."
+    )
+
+
+def _via_ctfak(path_for_ctfak: str, ctfak_hint: Optional[str],
+               notes: list) -> MFA:
+    """Last resort: drive the user-provided CTFAK, then load its MFA."""
+    tmp = tempfile.mkdtemp(prefix="cts2_")
+    mfa_file = exe_to_mfa(path_for_ctfak, ctfak=ctfak_hint, workdir=tmp)
+    notes.append(f"CTFAK produced {mfa_file}")
+    return load_mfa(mfa_file)
+
+
+def load_from_bytes(data: bytes, input_name: str,
+                    ctfak: Optional[str] = None) -> Tuple[MFA, List[str]]:
+    """Load any supported input from memory. Returns ``(mfa, notes)``."""
+    notes: List[str] = []
+    kind = detect.detect_bytes(data)
+    if kind == detect.KIND_MFA:
+        return load_mfa_bytes(data), notes
+    if kind == detect.KIND_EXE:
+        mfa = _exe_to_mfa_builtin(input_name, data, notes)
         if mfa is not None:
             return mfa, notes
         notes.append("built-in readers could not convert this EXE")
-        # Optional advanced fallback: only if the user configured one.
-        if not (ctfak_hint or ctfak_mod.find_ctfak_binary()):
-            raise RuntimeError(_ctfak_unavailable_message(input_path))
-        tmp = tempfile.mkdtemp(prefix="cts2_")
-        mfa_file = exe_to_mfa(input_path, ctfak=ctfak_hint, workdir=tmp)
-        notes.append(f"CTFAK produced {mfa_file}")
-        return load_mfa(mfa_file), notes
-    if lower.endswith(_CTFAK_ONLY_EXTS):
-        # These formats have no built-in reader; CTFAK is genuinely
-        # optional-and-required here, and never auto-installed.
-        if not (ctfak_hint or ctfak_mod.find_ctfak_binary()):
-            raise RuntimeError(_ctfak_unavailable_message(input_path))
-        tmp = tempfile.mkdtemp(prefix="cts2_")
-        mfa_file = exe_to_mfa(input_path, ctfak=ctfak_hint, workdir=tmp)
-        notes.append(f"CTFAK produced {mfa_file}")
-        return load_mfa(mfa_file), notes
-    mfa = load_mfa(input_path)
-    return mfa, notes
+        if not (ctfak or ctfak_mod.find_ctfak_binary()):
+            raise RuntimeError(_ctfak_unavailable_message(input_name))
+        tmp = tempfile.mkdtemp(prefix="cts2_up_")
+        src = os.path.join(tmp, os.path.basename(input_name) or "game.exe")
+        with open(src, "wb") as fh:
+            fh.write(data)
+        return _via_ctfak(src, ctfak, notes), notes
+    if kind == detect.KIND_GAMEDATA:
+        mfa, gnotes = gamedata.load_game_data_from_exe(data)
+        notes.append(
+            "read the raw Fusion 2.5 game data (PAME/PAMU) directly — "
+            "no .mfa, no CTFAK"
+        )
+        notes.extend(gnotes)
+        return mfa, notes
+    # Unknown content. Try the built-in readers anyway (cheap, in case the
+    # bytes are exotic), then the optional CTFAK fallback.
+    mfa = _exe_to_mfa_builtin(input_name, data, notes)
+    if mfa is not None:
+        return mfa, notes
+    if not (ctfak or ctfak_mod.find_ctfak_binary()):
+        raise RuntimeError(_unknown_input_message(input_name))
+    tmp = tempfile.mkdtemp(prefix="cts2_up_")
+    src = os.path.join(tmp, os.path.basename(input_name) or "input.bin")
+    with open(src, "wb") as fh:
+        fh.write(data)
+    return _via_ctfak(src, ctfak, notes), notes
+
+
+def load_project(path: str, ctfak: Optional[str] = None) -> Tuple[MFA, List[str]]:
+    """Load any supported input: a game .exe, an .mfa, a data file — or a
+    whole extracted game *folder*, whose game file is found automatically."""
+    if os.path.isdir(path):
+        candidates = iter_folder_candidates(path)
+        if not candidates:
+            raise RuntimeError(
+                f"no game found in folder '{path}'. Point the tool at the "
+                "game's .exe (the file you launch to play) — no .mfa is "
+                "needed."
+            )
+        failures: List[str] = []
+        for cand in candidates:
+            notes: List[str] = []
+            try:
+                with open(cand, "rb") as fh:
+                    data = fh.read()
+                mfa, notes = load_from_bytes(data, cand, ctfak)
+            except Exception as exc:  # noqa: BLE001 - try the next candidate
+                failures.append(f"{os.path.basename(cand)}: {exc}")
+                continue
+            notes.insert(0, f"folder input: using {os.path.basename(cand)}")
+            notes.extend(f"skipped {f}" for f in failures)
+            return mfa, notes
+        raise RuntimeError(
+            "no convertible game found in folder '{}'. Tried:\n  {}".format(
+                path, "\n  ".join(failures or ["(no candidate files)"]))
+        )
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return load_from_bytes(data, path, ctfak)
+
+
+# Back-compat alias (the old name is used by older call sites).
+_load_mfa_from_any = load_project
 
 
 def convert_file(input_path: str, output_path: Optional[str] = None,
                  report_path: Optional[str] = None,
                  ctfak: Optional[str] = None) -> dict:
-    """Convert a .mfa or .exe file to an SB3 project.
+    """Convert a game .exe / .mfa / data file / folder to an SB3 project.
 
     Returns {'project': bytes, 'mfa': MFA, 'report': dict}.
     """
-    mfa, notes = _load_mfa_from_any(input_path, ctfak)
+    mfa, notes = load_project(input_path, ctfak)
     sb3, report = build_project(mfa)
     if notes:
         report.setdefault("notes", []).extend(notes)
@@ -123,32 +244,7 @@ def convert_file(input_path: str, output_path: Optional[str] = None,
 
 def convert_bytes(data: bytes, input_name: str = "project.mfa",
                   ctfak: Optional[str] = None) -> dict:
-    lower = input_name.lower()
-    notes = []
-    if lower.endswith(_EXE_LIKE):
-        mfa = _exe_to_mfa_builtin(input_name, data, notes)
-        if mfa is None:
-            if not (ctfak or ctfak_mod.find_ctfak_binary()):
-                raise RuntimeError(_ctfak_unavailable_message(input_name))
-            tmp = tempfile.mkdtemp(prefix="cts2_up_")
-            src = os.path.join(tmp, input_name)
-            with open(src, "wb") as fh:
-                fh.write(data)
-            mfa_file = exe_to_mfa(src, ctfak=ctfak, workdir=tmp)
-            notes.append(f"CTFAK produced {mfa_file}")
-            mfa = load_mfa(mfa_file)
-    elif lower.endswith(_CTFAK_ONLY_EXTS):
-        if not (ctfak or ctfak_mod.find_ctfak_binary()):
-            raise RuntimeError(_ctfak_unavailable_message(input_name))
-        tmp = tempfile.mkdtemp(prefix="cts2_up_")
-        src = os.path.join(tmp, input_name)
-        with open(src, "wb") as fh:
-            fh.write(data)
-        mfa_file = exe_to_mfa(src, ctfak=ctfak, workdir=tmp)
-        notes.append(f"CTFAK produced {mfa_file}")
-        mfa = load_mfa(mfa_file)
-    else:
-        mfa = load_mfa_bytes(data)
+    mfa, notes = load_from_bytes(data, input_name, ctfak)
     sb3, report = build_project(mfa)
     if notes:
         report.setdefault("notes", []).extend(notes)

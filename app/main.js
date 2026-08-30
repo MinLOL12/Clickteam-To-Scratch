@@ -110,11 +110,13 @@ function createWindow() {
 
 ipcMain.handle('pick-files', async () => {
   const res = await dialog.showOpenDialog(win, {
-    title: 'Choose Clickteam project files',
+    title: 'Choose the game\'s .exe (an .mfa works too)',
     buttonLabel: 'Convert',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Clickteam files', extensions: ['mfa', 'exe', 'ccn', 'apk', 'dat', 'bin'] },
+      { name: 'Fusion game executables', extensions: ['exe'] },
+      { name: 'MFA projects', extensions: ['mfa'] },
+      { name: 'Data files', extensions: ['dat', 'bin', 'ccn', 'apk'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });
