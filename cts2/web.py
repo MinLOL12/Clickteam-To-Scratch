@@ -1,4 +1,7 @@
-"""Tiny stdlib web UI for uploading a Clickteam .mfa/.exe and downloading SB3."""
+"""Tiny stdlib web UI: drop a Clickteam game .exe, download an .sb3.
+
+No .mfa needed — the game data is read straight out of the executable.
+"""
 from __future__ import annotations
 
 import json
@@ -19,26 +22,29 @@ button{background:#3d6bff;color:#fff;border:0;padding:.7rem 1.2rem;border-radius
 .msg{white-space:pre-wrap;background:#10131d;border:1px solid #2a3355;border-radius:8px;padding:1rem;font-size:.85rem}
 code{background:#26304d;padding:.1rem .35rem;border-radius:4px}
 </style></head><body>
-<h1>Clickteam Fusion (MMF2 / Fusion 2.5) → Scratch / PenguinMod</h1>
+<h1>Clickteam Fusion game &rarr; Scratch / PenguinMod</h1>
 <div class="card">
-<p>Upload a <code>.mfa</code> project &mdash; or a <code>.exe</code>. Everything
-runs on the built-in readers: the EXE pack extractor and the native PAME/PAMU
-game-data reader. <strong>No CTFAK or any other external tool is needed.</strong>
-(<code>.ccn/.apk/.dat/.bin</code> need the optional <code>CTFAK_BIN</code>
-fallback.)</p>
+<p><strong>Drop in the game&rsquo;s <code>.exe</code></strong> &mdash; the file
+you launch to play (e.g. <code>FiveNightsatFreddys.exe</code>). The whole game
+is read straight out of the executable by the built-in readers.
+<strong>No <code>.mfa</code> file, no CTFAK, no Clickteam editor needed.</strong></p>
+<p class="muted">An <code>.mfa</code> project or a raw <code>PAME/PAMU</code>
+data file also works if you happen to have one. The file type is detected from
+the file <em>contents</em>, so even a renamed file converts.</p>
 <form method="post" enctype="multipart/form-data" id="f">
-<input type="file" name="file" id="file" accept=".mfa,.exe,.ccn,.apk,.dat,.bin">
+<input type="file" name="file" id="file" accept=".exe,.mfa,.dat,.bin,.ccn,.apk">
 <button type="submit">Convert to .sb3</button>
 </form>
 <p>For a no-setup desktop experience see the <code>app/</code> Electron app
 (<code>npm start</code> in <code>app/</code>).</p>
 </div>
 <div class="card"><h2>How it works</h2>
-<p>MFA files are parsed locally in the server process: frames, frame
-items/instances, image &amp; sound banks, globals and the event tree are read,
-then a real Scratch 3 / PenguinMod <code>.sb3</code> project is generated with
-sprites, costumes, positions and starter scripts.</p>
-<p>See the README for the supported event subset and EXE notes.</p>
+<p>The game is parsed locally in the server process: the EXE&rsquo;s embedded
+game data (PAME/PAMU region) is decoded &mdash; frames, objects, image &amp;
+sound banks, globals &mdash; then a real Scratch 3 / PenguinMod
+<code>.sb3</code> project is generated with sprites, costumes, positions and
+starter scripts.</p>
+<p>See the README for the supported event subset.</p>
 </div>
 <div id="msg" class="msg"></div>
 <script>
@@ -46,8 +52,8 @@ const f=document.getElementById('f'),msg=document.getElementById('msg');
 f.addEventListener('submit', async e=>{
  e.preventDefault();
  const file=document.getElementById('file').files[0];
- if(!file){msg.textContent='Select a .mfa file.';return}
- msg.textContent='Converting...';
+ if(!file){msg.textContent="Choose the game's .exe first — no .mfa needed.";return}
+ msg.textContent='Converting '+file.name+'...';
  const fd=new FormData();fd.append('file',file);
  const r=await fetch('/convert',{method:'POST',body:fd});
  if(!r.ok){msg.textContent='Conversion failed: '+await r.text();return}
