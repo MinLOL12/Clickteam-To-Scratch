@@ -1,10 +1,14 @@
-"""Locate and drive the community CTFAK CLI for the EXE -> MFA step.
+"""Locate and drive the community CTFAK CLI (OPTIONAL fallback).
 
 CTFAK (https://github.com/CTFAK/CTFAK2.0) is a .NET 6 desktop tool that the
-Fusion community maintains; it is the only known way to re-serialize the
-game-data region of an F2.5 EXE back into a ``.mfa``.  Its ``CTFAK.Cli``
-interface is interactive by default, so we always invoke it with the
-documented headless arguments::
+Fusion community maintains. It used to be the only way to re-serialize the
+game-data region of an F2.5 EXE back into a ``.mfa``; since this package
+gained its native PAME/PAMU reader (``cts2/gamedata.py``) CTFAK is no
+longer required for anything — it remains an optional advanced fallback
+for exotic builds and for ``.ccn``/``.apk``/``.dat``/``.bin`` inputs.
+
+Its ``CTFAK.Cli`` interface is interactive by default, so we always invoke
+it with the documented headless arguments::
 
     CTFAK.Cli.exe -path <game.exe> -parameters "" -tool "Export as MFA" -closeonfinish
 
@@ -157,9 +161,11 @@ def exe_to_mfa(exe_path: str, ctfak: Optional[str] = None,
     ctfak_path = ctfak or find_ctfak_binary()
     if not ctfak_path:
         raise CtfakNotFoundError(
-            "No CTFAK binary found. EXE -> MFA rebuilds need the community "
-            "'CTFAK' tool (it re-serializes the game data out of the EXE).\n"
-            "How to get it:\n"
+            "No CTFAK binary found. The built-in readers already convert "
+            "plain .mfa files and Fusion 2.5 EXEs without any external "
+            "tools; CTFAK is only an optional fallback for builds the "
+            "built-in reader cannot handle (or for .ccn/.apk/.dat/.bin).\n"
+            "If you want the optional CTFAK fallback:\n"
             "  1. Install the .NET 6 Desktop Runtime (x64): "
             "https://dotnet.microsoft.com/en-us/download/dotnet/6.0\n"
             "  2. Get CTFAK 2.0: https://github.com/CTFAK/CTFAK2.0\n"
@@ -169,7 +175,7 @@ def exe_to_mfa(exe_path: str, ctfak: Optional[str] = None,
             "  3. Point this tool at CTFAK.Cli.exe: set CTFAK_BIN=/path/to/CTFAK.Cli.exe\n"
             "     or pass --ctfak PATH on the command line\n"
             "     or drop a CTFAK build into app/resources/ctfak/\n"
-            "Plain .mfa conversion never needs CTFAK."
+            "Regular .mfa and EXE conversion never needs CTFAK."
         )
 
     ctfak_dir = os.path.dirname(os.path.abspath(ctfak_path))
@@ -220,10 +226,12 @@ def status(hint: Optional[str] = None) -> dict:
         "path": found,
         "searched": candidate_ctfak_paths(hint) if not found else [],
         "native_pack": "built-in",
+        "native_game_data": "built-in",
         "note": (
-            "Plain .mfa files and EXEs whose pack contains a raw MFA are "
-            "converted by the built-in extractor; CTFAK is only needed for "
-            "the full EXE -> MFA rebuild."
+            "CTFAK is optional. Plain .mfa files and Fusion 2.5 EXEs are "
+            "converted by the built-in readers (pack extractor + native "
+            "PAME/PAMU game-data reader); CTFAK is only a fallback for "
+            "exotic builds and .ccn/.apk/.dat/.bin inputs."
         ),
     }
     return result

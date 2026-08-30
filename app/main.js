@@ -201,8 +201,8 @@ ipcMain.handle('convert', async (_e, { input, output }) => {
   const args = buildCliArgs({ input, output, ctfak: ctfak ? ctfak.path : null });
   logLine(`[convert] ${path.basename(input)} -> ${path.basename(output)}`);
   if (exeLike) {
-    if (ctfak) logLine(`[ctfak] using ${ctfak.path} (${ctfak.source})`);
-    else logLine('[ctfak] not found - trying built-in EXE pack extraction first');
+    if (ctfak) logLine(`[ctfak] optional fallback available at ${ctfak.path} (${ctfak.source})`);
+    else logLine('[convert] EXE conversion runs on the built-in readers (no CTFAK)');
   }
   const { code, out, err } = await runPythonCli({
     python: runtime.pythonPath,

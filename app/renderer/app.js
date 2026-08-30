@@ -121,7 +121,7 @@
     refreshRuntime();
   };
 
-  // ctfak card
+  // ctfak card (optional fallback only — EXE conversion is built-in)
   async function refreshCtfak() {
     const s = await window.cts.ctfakStatus();
     const el = $('ctfakStatus');
@@ -129,7 +129,7 @@
       el.innerHTML = '<span class="ok">✓ found</span> <span class="path"></span><br><span class="muted">via ' + s.source + '</span>';
       el.querySelector('.path').textContent = s.path;
     } else {
-      el.innerHTML = '<span class="warn">not found</span> — only needed for EXE rebuilds.';
+      el.innerHTML = '<span class="ok">not needed</span> — EXE conversion is built-in; CTFAK is only an advanced fallback.';
     }
     $('ctfakHelp').textContent = s.help || '';
   }
