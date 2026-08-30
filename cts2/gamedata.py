@@ -453,9 +453,16 @@ def _read_object_common(r: Reader, two_five_plus: bool,
         r.i16()  # extension offset
         counter_off = r.i16()
     elif build >= 284:
+        # MMF2 build 284+ (FNaF 1's layout): size, 2 skipped bytes, then a
+        # peeked "check" word that distinguishes two field orders.  Both
+        # orders continue *right after the size field* — the check is a
+        # peek, so seek back before reading the offsets (CTFAK seeks to
+        # currentPosition + 4 here; skipping that leaves every offset
+        # shifted by 2 bytes and the animations unreadable).
         r.i32()  # size
         r.skip(2)
         check = r.i32()
+        r.seek(start + 4)
         if build == 284 and check == 0:
             counter_off = r.i16()
             r.i32()  # version
@@ -645,12 +652,68 @@ class _GameReader:
         self.frames: List[Frame] = []
         self.event_sizes: List[int] = []
         self.warnings: List[str] = []
+        self.decryptor: Optional[_Decryptor] = None
+        self.missing_object_notes: List[str] = []
 
     # -- chunk interpreters -------------------------------------------------
 
     def _decoded(self, chunk: _Chunk, decryptor: _Decryptor) -> Optional[bytes]:
         return _decode_chunk(chunk, decryptor, self.name, self.copyright,
                              self.editor_filename, self.warnings)
+
+    def _decoded_chunks(self, r: Reader) -> List[_Chunk]:
+        """Walk a *nested* chunk list, decoding every payload.
+
+        The chunk *headers* (id/flags/size) are always stored plain, but the
+        payloads of the sub-chunks inside frames (name, instances, layers,
+        events, ...) and inside old-style object infos are usually zlib
+        compressed and/or RC4 encrypted by the game.  The reference readers
+        (CTFAK / Anaconda) run every chunk through the same flag handling
+        recursively; skipping it yields the raw stream, which parses as
+        garbage instances and "missing object" warnings (the classic MMF2
+        symptom).  Undecodable payloads fall back to the raw bytes.
+        """
+        out: List[_Chunk] = []
+        while r.remaining() >= 8:
+            cid = r.i16()
+            flags = r.i16()
+            size = r.i32()
+            if cid == CHUNK_LAST:
+                break
+            if size < 0 or size > r.remaining():
+                break
+            raw = r.read(size)
+            chunk = _Chunk(cid, flags, size, raw)
+            if flags == 0:
+                out.append(chunk)
+                continue
+            data = None
+            if self.decryptor is not None:
+                data = self._decoded(chunk, self.decryptor)
+            if data is None:
+                data = raw  # best effort: try to interpret undecoded bytes
+            out.append(_Chunk(cid, 0, len(data), data))
+        return out
+
+    def _note_missing_object(self, frame_name: str, inst_handle: int,
+                             object_info: int) -> None:
+        self.missing_object_notes.append(
+            f"instance {inst_handle} in {frame_name or '(unnamed frame)'} "
+            f"references missing object {object_info}"
+        )
+
+    def _fold_missing_object_notes(self) -> None:
+        """Cap the per-instance noise: keep the first few, then summarize."""
+        notes = self.missing_object_notes
+        if not notes:
+            return
+        cap = 8
+        self.warnings.extend(notes[:cap])
+        if len(notes) > cap:
+            self.warnings.append(
+                f"... and {len(notes) - cap} more instance(s) reference "
+                "missing objects (frame items were not readable)"
+            )
 
     def _read_app_header(self, data: bytes) -> None:
         r = Reader(data)
@@ -805,13 +868,52 @@ class _GameReader:
         try:
             count = r.i32()
             if count < 0 or count > 65536:
+                self.warnings.append(
+                    f"frame items chunk has implausible count {count}; "
+                    "objects skipped"
+                )
                 return
             for _ in range(count):
                 info = _read_chunked_object_info(
-                    _read_object_block(r), self.two_five_plus, self.build)
+                    self._read_object_block(r), self.two_five_plus, self.build)
+                if info.handle < 0:
+                    self.warnings.append(
+                        "a frame item could not be read (no object header "
+                        "chunk found); it is skipped"
+                    )
+                    continue
                 self._finalize_object(info)
         except Exception as exc:  # noqa: BLE001
             self.warnings.append(f"frame items unreadable: {exc}")
+
+    def _read_object_block(self, r: Reader) -> bytes:
+        """Read one old-style chunked ObjectInfo from ``r``.
+
+        The inner chunks (object header 17476, name 17477, properties
+        17478) may be zlib compressed and/or RC4 encrypted like any other
+        chunk, so every payload goes through the normal flag handling and
+        is re-serialized plain for :func:`_read_chunked_object_info`.
+        """
+        out = bytearray()
+        while r.remaining() >= 8:
+            cid = r.i16()
+            flags = r.i16()
+            size = r.i32()
+            if cid == CHUNK_LAST:
+                break
+            if size < 0 or size > r.remaining():
+                break
+            chunk = _Chunk(cid, flags, size, r.read(size))
+            payload = chunk.raw
+            if flags != 0:
+                decoded = None
+                if self.decryptor is not None:
+                    decoded = self._decoded(chunk, self.decryptor)
+                if decoded is not None:
+                    payload = decoded
+            out += struct.pack("<hhi", cid, 0, len(payload))
+            out += payload
+        return bytes(out)
 
     def _read_frame_items_25(self, header: bytes, names: Optional[bytes],
                              props_data: Optional[bytes]) -> None:
@@ -1068,7 +1170,7 @@ class _GameReader:
         frame = Frame(handle, f"Frame {len(self.frames) + 1}", 0, 0,
                       (0, 0, 0, 0), 0, 0, "")
         try:
-            for chunk in _read_chunk_list(r):
+            for chunk in self._decoded_chunks(r):
                 if chunk.id == FRAME_HEADER:
                     hr = Reader(chunk.raw)
                     if hr.remaining() >= 16:
@@ -1082,6 +1184,10 @@ class _GameReader:
                     ir = Reader(chunk.raw)
                     count = ir.i32()
                     if count < 0 or count > 65536:
+                        self.warnings.append(
+                            f"{frame.name or 'A frame'}: implausible "
+                            f"instance count {count}; instances skipped"
+                        )
                         continue
                     for _ in range(count):
                         if ir.remaining() < 20:
@@ -1095,9 +1201,8 @@ class _GameReader:
                         layer = ir.i16()
                         ir.i16()  # instance number
                         if object_info not in self.objects:
-                            self.warnings.append(
-                                f"instance {inst_handle} in {frame.name} "
-                                f"references missing object {object_info}")
+                            self._note_missing_object(
+                                frame.name, inst_handle, object_info)
                             continue
                         frame.instances.append(FrameInstance(
                             x, y, layer, inst_handle, 0, parent_type,
@@ -1131,6 +1236,7 @@ class _GameReader:
 
     def interpret(self, chunks: List[_Chunk]) -> None:
         decryptor = _Decryptor(self.build)
+        self.decryptor = decryptor
 
         # Pre-pass: pull the key materials out of the (rarely encrypted)
         # string chunks so encrypted chunks can be decoded immediately.
@@ -1223,36 +1329,7 @@ class _GameReader:
             )
             self._read_frame(data, handle)
 
-
-def _read_object_block(r: Reader) -> bytes:
-    """Read one old-style chunked ObjectInfo (raw bytes) from ``r``."""
-    chunks: List[_Chunk] = []
-    while r.remaining() >= 8:
-        cid = r.i16()
-        flags = r.i16()
-        size = r.i32()
-        if cid == CHUNK_LAST:
-            break
-        if size < 0 or size > r.remaining():
-            break
-        chunks.append(_Chunk(cid, flags, size, r.read(size)))
-    # Re-serialize the payloads. These inner chunks are normally stored
-    # plain, but handle the zlib-compressed form for completeness (no
-    # decryption applies to object-info chunks).
-    out = bytearray()
-    for c in chunks:
-        payload = c.raw
-        flags = c.flags
-        if flags == 1 and len(payload) >= 8:
-            try:
-                comp_size = struct.unpack_from("<I", payload, 4)[0]
-                payload = zlib.decompress(payload[8 : 8 + comp_size])
-                flags = 0
-            except Exception:  # noqa: BLE001
-                pass
-        out += struct.pack("<hhi", c.id, flags, len(payload))
-        out += payload
-    return bytes(out)
+        self._fold_missing_object_notes()
 
 
 # --------------------------------------------------------------------------

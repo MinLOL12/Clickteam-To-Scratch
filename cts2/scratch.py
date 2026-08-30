@@ -161,7 +161,10 @@ class TargetBuilder:
             "broadcasts": self.broadcasts,
             "blocks": self.blocks,
             "comments": self.comments,
-            "currentCostume": self.current_costume,
+            # Scratch's currentCostume is a 0-based index; an out-of-range
+            # value makes editors render the "?" placeholder costume.
+            "currentCostume": max(0, min(self.current_costume,
+                                         len(self.costumes) - 1)),
             "costumes": self.costumes,
             "sounds": self.sounds,
             "volume": 100,

@@ -32,8 +32,10 @@ The game-data region is the compiled project: the app header, global
 values/strings, every object with its animations, alterable values and
 movements, every frame's layers and instances, and the image/sound/font
 banks. `cts2/gamedata.py` reads it **directly** — including the
-modified-RC4 chunk encryption used by newer builds — so the conversion runs
-with **zero external tools**. CTFAK is not required and not invoked; it
+modified-RC4 chunk encryption used by newer builds, and the zlib/RC4
+payload encoding MMF2-era builds (FNaF 1's build 284 and friends) apply
+to the sub-chunks *inside* frames and object infos — so the conversion
+runs with **zero external tools**. CTFAK is not required and not invoked; it
 remains only an optional last-resort fallback for exotic builds
 (`--ctfak`, off by default).
 
@@ -111,6 +113,7 @@ What "no Python setup" means in practice:
 | Folder input (auto-finds the game file inside an extracted build) | ✅ |
 | Content-based input detection (renamed / extension-less files) | ✅ |
 | Raw PAME/PAMU data files → SB3 | ✅ |
+| MMF2-era EXEs (build 284, e.g. FNaF 1): compressed/encrypted frame & object sub-chunks, 284 ObjectCommon layout | ✅ |
 | MMF2 / Fusion 2.5 `.mfa` projects (if you happen to have one) | ✅ |
 | Active, backdrop, quick-backdrop, counters, text/lives | ✅ parsed |
 | Image bank (24/15/16/32 bpp + zlib + LZ4/LZ4M + alpha + transparent) | ✅ decoded to PNG |
