@@ -91,13 +91,21 @@ def block_broadcast(blocks: dict, broadcast: str, next_id: Optional[str]) -> str
     bid = _nid()
     blocks[bid] = _block(
         "event_broadcast", next_id=next_id,
-        inputs={"BROADCAST_OPTION": [1, [11, broadcast, broadcast]]},
+        inputs={"BROADCAST_INPUT": [1, [11, broadcast, broadcast]]},
     )
     return bid
 
 
-def _asset_name(data: bytes, ext: str) -> str:
-    return hashlib.md5(data).hexdigest() + "." + ext
+def _asset_ids(data: bytes, ext: str) -> tuple:
+    """Return ``(assetId, md5ext)`` for a Scratch 3 costume/sound.
+
+    Scratch stores the bare MD5 hex as ``assetId`` and ``md5hex.ext`` as
+    ``md5ext`` (and as the zip entry name).  Putting the extension into
+    ``assetId`` makes the VM fail to resolve the bitmap, so costumes
+    render as the empty \"?\" placeholder even when the PNG is in the zip.
+    """
+    digest = hashlib.md5(data).hexdigest()
+    return digest, f"{digest}.{ext}"
 
 
 class TargetBuilder:
@@ -106,55 +114,71 @@ class TargetBuilder:
         self.name = name
         self.variables: Dict[str, List[Any]] = {}
         self.lists: Dict[str, List[Any]] = {}
-        self.broadcasts: Dict[str, List[Any]] = {}
+        # Scratch: broadcasts is {id: name}, not {id: [name, id]}.
+        self.broadcasts: Dict[str, str] = {}
         self.blocks: Dict[str, dict] = {}
         self.costumes: List[dict] = []
         self.sounds: List[dict] = []
-        self.comments: List[dict] = {}
+        self.comments: Dict[str, dict] = {}
         self.current_costume = 0
+        self.layerOrder = 0
+        # Sprite-only defaults (Scratch rejects projects that omit them).
+        self.visible = True
+        self.x = 0
+        self.y = 0
+        self.size = 100
+        self.direction = 90
+        self.draggable = False
+        self.rotationStyle = "all around"
 
     def add_variable(self, var_id: str, name: str, value: Any = 0) -> str:
         self.variables[var_id] = [name, value]
         return var_id
 
     def add_broadcast(self, name: str) -> str:
+        for bid, bname in self.broadcasts.items():
+            if bname == name:
+                return bid
         bid = str(uuid.uuid4())
-        self.broadcasts[bid] = [name, bid]
+        self.broadcasts[bid] = name
         return bid
 
     def add_costume(self, png: bytes, name: str, cx: int = 0, cy: int = 0) -> str:
-        data_id = _asset_name(png, "png")
+        asset_id, md5ext = _asset_ids(png, "png")
         self.costumes.append(
             {
                 "name": name,
                 "bitmapResolution": 1,
                 "dataFormat": "png",
-                "assetId": data_id,
-                "md5ext": data_id,
+                "assetId": asset_id,
+                "md5ext": md5ext,
                 "rotationCenterX": cx,
                 "rotationCenterY": cy,
             }
         )
-        return data_id
+        return md5ext
 
     def add_costume_from_svg(self, svg: bytes, name: str,
                              cx: int = 0, cy: int = 0) -> str:
-        data_id = _asset_name(svg, "svg")
+        asset_id, md5ext = _asset_ids(svg, "svg")
         self.costumes.append(
             {
                 "name": name,
                 "bitmapResolution": 1,
                 "dataFormat": "svg",
-                "assetId": data_id,
-                "md5ext": data_id,
+                "assetId": asset_id,
+                "md5ext": md5ext,
                 "rotationCenterX": cx,
                 "rotationCenterY": cy,
             }
         )
-        return data_id
+        return md5ext
 
     def to_json(self) -> dict:
-        return {
+        n_costumes = len(self.costumes)
+        current = 0 if n_costumes == 0 else max(
+            0, min(self.current_costume, n_costumes - 1))
+        out = {
             "isStage": self.is_stage,
             "name": self.name,
             "variables": self.variables,
@@ -164,13 +188,26 @@ class TargetBuilder:
             "comments": self.comments,
             # Scratch's currentCostume is a 0-based index; an out-of-range
             # value makes editors render the "?" placeholder costume.
-            "currentCostume": max(0, min(self.current_costume,
-                                         len(self.costumes) - 1)),
+            "currentCostume": current,
             "costumes": self.costumes,
             "sounds": self.sounds,
             "volume": 100,
-            "layerOrder": 0,
+            "layerOrder": self.layerOrder,
         }
+        if self.is_stage:
+            out["tempo"] = 60
+            out["videoTransparency"] = 50
+            out["videoState"] = "off"
+            out["textToSpeechLanguage"] = None
+        else:
+            out["visible"] = self.visible
+            out["x"] = self.x
+            out["y"] = self.y
+            out["size"] = self.size
+            out["direction"] = self.direction
+            out["draggable"] = self.draggable
+            out["rotationStyle"] = self.rotationStyle
+        return out
 
 
 def _event_notes_svg(mfa: MFA) -> Optional[bytes]:
@@ -238,17 +275,24 @@ def build_project(mfa: MFA, progress=None) -> tuple:
     stage = TargetBuilder("Stage", is_stage=True)
     if mfa.frames:
         f = mfa.frames[0]
-        png = solid_png(480, 360, f.background)
-        data = stage.add_costume(png, "backdrop1")
+        # Prefer the frame background colour; fall back to white if the
+        # colour is fully transparent (some EXEs leave alpha at 0).
+        bg = f.background
+        if len(bg) < 4 or bg[3] == 0:
+            bg = (bg[0], bg[1], bg[2], 255) if bg[:3] != (0, 0, 0) else (255, 255, 255, 255)
+            if f.background[:3] == (0, 0, 0) and (len(f.background) < 4 or f.background[3] == 0):
+                bg = (0, 0, 0, 255)  # intentional black
+        png = solid_png(480, 360, bg)
+        data = stage.add_costume(png, "backdrop1", 240, 180)
         assets[data] = png
     elif mfa.images:
         first = next(iter(mfa.images.values()))
         if first.png:
-            data = stage.add_costume(first.png, "backdrop1")
+            data = stage.add_costume(first.png, "backdrop1", 240, 180)
             assets[data] = first.png
     else:
         png = solid_png(480, 360, (255, 255, 255, 255))
-        data = stage.add_costume(png, "backdrop1")
+        data = stage.add_costume(png, "backdrop1", 240, 180)
         assets[data] = png
 
     sprites: List[TargetBuilder] = []
@@ -463,14 +507,23 @@ def _sprite_name(frame: Frame, item: ObjectData) -> str:
 
 def _add_sprite_scripts(sb: TargetBuilder, frame: Frame, inst: FrameInstance,
                         item: ObjectData, costumes: int) -> None:
-    sx = inst.x - frame.size_x / 2
-    sy = frame.size_y / 2 - inst.y
+    # Clickteam origin is top-left; Scratch origin is stage centre.
+    # Scale the frame into Scratch's 480x360 stage so objects land on-screen
+    # even when the Fusion window is 1280x720 (or any other size).
+    fw = frame.size_x or 640
+    fh = frame.size_y or 480
+    sx = (inst.x - fw / 2.0) * (480.0 / fw)
+    sy = (fh / 2.0 - inst.y) * (360.0 / fh)
+    sb.x = sx
+    sb.y = sy
     # Honour the Clickteam object's initial visibility: an instance that
     # starts hidden must stay hidden (and appears only when the converted
     # events call `show`), instead of being force-shown at green flag.
+    visible = getattr(inst, "visible", True)
+    sb.visible = bool(visible)
     vis_id = _nid()
     sb.blocks[vis_id] = _block(
-        "looks_show" if getattr(inst, "visible", True) else "looks_hide")
+        "looks_show" if visible else "looks_hide")
     gotoxy_id = _nid()
     sb.blocks[gotoxy_id] = _block(
         "motion_gotoxy", next_id=vis_id,

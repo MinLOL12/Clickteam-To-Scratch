@@ -1238,6 +1238,21 @@ class _GameReader:
                         frame.layers.append(Layer(name, flags, xc, yc))
                 elif chunk.id == FRAME_EVENTS:
                     self.event_sizes.append(len(chunk.raw))
+                    # Decode the compiled EXE event program into the same
+                    # EventGroup structures the MFA reader produces, so the
+                    # Scratch transpiler can turn them into real blocks.
+                    try:
+                        from .events_exe import normalize_exe_opcodes, read_exe_events
+                        groups, ewarns = read_exe_events(chunk.raw, self.build)
+                        for w in ewarns:
+                            self.warning(f"{frame.name or 'frame'}: {w}")
+                        frame.event_groups = [
+                            normalize_exe_opcodes(g) for g in groups
+                        ]
+                    except Exception as exc:  # noqa: BLE001
+                        self.warning(
+                            f"{frame.name or 'frame'}: events unreadable: {exc}"
+                        )
                 # palette (13111), transitions (13113-13116), virtual size
                 # (13122), random seed (13124), layer effects (13125) are
                 # not needed for the SB3 export.
@@ -1545,10 +1560,11 @@ def load_game_data_from_exe(source, progress=None) -> Tuple[MFA, List[str]]:
         notes.append("Fusion 2.5+ object/image layout detected")
     if reader.event_sizes:
         total = sum(reader.event_sizes)
+        decoded = sum(len(f.event_groups) for f in reader.frames)
         notes.append(
             f"{len(reader.event_sizes)} frame(s) carry compiled event "
-            f"programs ({total} bytes total); compiled events are not "
-            "decoded into Scratch blocks"
+            f"programs ({total} bytes total); decoded {decoded} event "
+            f"group(s) for Scratch block conversion"
         )
     for w in reader.warnings:
         notes.append(f"warning: {w}")

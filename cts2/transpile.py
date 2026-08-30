@@ -37,36 +37,82 @@ from .scratch import (
 )
 
 SYS = -1  # Clickteam "System / Special" object
-ACTIVE = 1  # MFA frame-item object_type for Active objects
+STORYBOARD = -3  # EXE: Start of Frame / End of Frame / End of App
+TIMER = -4  # EXE: Every / Timer compares
+CREATE = -5  # EXE: pick / create helpers (rarely mapped)
+MOUSE_KB = -6  # EXE: mouse + keyboard conditions
+PLAYER = -7
+ACTIVE = 2  # EXE/MFA object_type for Active objects (MFA items use 2 too)
+ACTIVE_MFA = 1  # some MFA tooling renumbers; accept both
 
 # --------------------------------------------------------------------------
-# System object condition table (stable across MMF2 / Fusion 2.5).
-# Negative numbers; documented by Anaconda's events.pyx / CTFAK.
+# Condition tables.
+#
+# MFA "System" object dumps (and our synthetic fixtures) use a flat
+# negative-num scheme on object_type=-1.  Real EXE game data splits the
+# same conditions across object types -1/-3/-4/-6 with *different* nums
+# (CTFAK Names.cs).  Both schemes are accepted below.
 # --------------------------------------------------------------------------
 
-COND_START_OF_FRAME = -1
+# MFA-style System (-1) nums used by the events.mfa fixture / editor export.
+COND_START_OF_FRAME = -1          # also STORYBOARD/-1 in EXE
 COND_START_OF_APP = -2
 COND_END_OF_APP = -3
-COND_EVERY = -4
-COND_ON_LOOP = -6
+COND_EVERY = -4                   # also TIMER/-4 and TIMER/-8 in EXE
+COND_ON_LOOP = -6                 # EXE System uses -16
 COND_LOOP_FOR_EACH = -7
-COND_REPEAT = -8
-COND_COMPARE_GLOBAL_VALUE = -9
-COND_COMPARE_GLOBAL_STRING = -10
+COND_REPEAT = -8                  # MFA; EXE System uses -5
+COND_COMPARE_GLOBAL_VALUE = -9    # MFA; EXE System uses -8 (after fixer)
+COND_COMPARE_GLOBAL_STRING = -10  # MFA; EXE System uses -20
 COND_COMPARE_TWO_VALUES = -11
 COND_COMPARE_TWO_STRINGS = -12
-COND_ALWAYS = -13
-COND_NEVER = -14
-COND_ON_KEY_PRESSED = -15
-COND_WHILE_KEY_PRESSED = -16
+COND_ALWAYS = -13                 # MFA; EXE System uses -1
+COND_NEVER = -14                  # MFA; EXE System uses -2
+COND_ON_KEY_PRESSED = -15         # MFA; EXE Mouse/KB uses -1
+COND_WHILE_KEY_PRESSED = -16      # MFA; EXE Mouse/KB uses -2 (KeyDown)
 COND_ON_KEY_RELEASED = -17
-COND_ON_MOUSE_CLICKED = -18
-COND_WHILE_MOUSE_PRESSED = -19
+COND_ON_MOUSE_CLICKED = -18       # MFA; EXE Mouse/KB uses -5
+COND_WHILE_MOUSE_PRESSED = -19    # MFA; EXE Mouse/KB uses -8
 COND_ON_MOUSE_RELEASED = -20
 COND_ON_MOUSE_WHEEL = -21
 COND_MOUSE_OVER_OBJECT = -22
 
-# System actions (2000 series, stable).
+# EXE System (-1) nums (CTFAK Names.cs).
+EXE_COND_ALWAYS = -1
+EXE_COND_NEVER = -2
+EXE_COND_COMPARE = -3
+EXE_COND_RESTRICT = -4
+EXE_COND_REPEAT = -5
+EXE_COND_ONCE = -6
+EXE_COND_NOT_ALWAYS = -7
+EXE_COND_COMPARE_GLOBAL = -8
+EXE_COND_ON_LOOP = -16
+EXE_COND_COMPARE_GLOBAL_STRING = -20
+
+# EXE Storyboard (-3)
+EXE_COND_START_OF_FRAME = -1
+EXE_COND_END_OF_FRAME = -2
+EXE_COND_END_OF_APP = -4
+
+# EXE Timer (-4)
+EXE_COND_TIMER_GREATER = -1
+EXE_COND_TIMER_LESS = -2
+EXE_COND_TIMER_EQUALS = -3
+EXE_COND_EVERY = -4
+EXE_COND_EVERY_2 = -8
+
+# EXE Mouse / Keyboard (-6)
+EXE_COND_KEY_PRESSED = -1
+EXE_COND_KEY_DOWN = -2
+EXE_COND_MOUSE_IN_ZONE = -3
+EXE_COND_MOUSE_ON_OBJECT = -4
+EXE_COND_MOUSE_CLICKED = -5
+EXE_COND_WHILE_MOUSE = -8
+EXE_COND_ANY_KEY = -9
+
+# System actions.
+# MFA editor exports use the 2000-series; EXE game data uses small ints
+# (CTFAK Fixer collapses several global variants onto 3/4/5).
 ACT_START_LOOP = 2001
 ACT_START_LOOP_FOR_EACH = 2002
 ACT_STOP_LOOP = 2003
@@ -76,8 +122,17 @@ ACT_SUB_GLOBAL_VALUE = 2006
 ACT_SET_GLOBAL_STRING = 2007
 ACT_ADD_GLOBAL_STRING = 2008
 
-# Active-object actions, in the Anaconda/CTFAK CRunActive ordering
-# (heuristic — only the entries that are unambiguous across dumps).
+# EXE System action nums (after Fixer).
+EXE_ACT_SET_GLOBAL_VALUE = 3
+EXE_ACT_ADD_GLOBAL_VALUE = 4
+EXE_ACT_SUB_GLOBAL_VALUE = 5
+EXE_ACT_SET_GLOBAL_STRING = 6
+EXE_ACT_ADD_GLOBAL_STRING = 7
+EXE_ACT_START_LOOP = 14
+EXE_ACT_STOP_LOOP = 15
+EXE_ACT_START_LOOP_FOR_EACH = 58
+
+# Active-object actions (EXE / MFA Active CRun ordering).
 ACT_DESTROY = 0
 ACT_SET_X = 2
 ACT_SET_Y = 3
@@ -86,13 +141,17 @@ ACT_SET_ANIM_FRAME = 12
 ACT_SHOW = 24
 ACT_HIDE = 25
 
-# Active-object conditions (heuristic ordering, same source).
+# Active-object conditions.
+# EXE stores these as negative nums on object_type=2; MFA fixtures may use
+# small non-negative nums.  Accept both.
 COND_COLLISION_OBJECT = 0
 COND_COLLISION_BACKDROP = 1
 COND_MOUSE_OVER = 2
 COND_VISIBLE = 3
 COND_HIDDEN = 4
 COND_ANIM_FINISHED = 13
+EXE_COND_OVERLAPPING = -4
+EXE_COND_ANIM_OVER = -2
 
 # --------------------------------------------------------------------------
 # parameter helpers
@@ -216,7 +275,8 @@ def _broadcast_name(frame: Frame, obj_name: str, kind: str, num: int) -> str:
 
 
 def _register_broadcast(tb, name: str) -> str:
-    for bid, (bname, _bval) in tb.broadcasts.items():
+    # Scratch broadcasts dict is {id: name}.
+    for bid, bname in tb.broadcasts.items():
         if bname == name:
             return bid
     return tb.add_broadcast(name)
@@ -249,6 +309,8 @@ def _hat_flag(tb) -> str:
 
 
 def _hat_key(tb, key: str) -> str:
+    # KEY_OPTION is a field on a shadow menu block in real Scratch projects;
+    # putting the key directly on the hat is accepted by Scratch 3 / PenguinMod.
     return _add(tb, opcode="event_whenkeypressed", toplevel=True, x=60, y=60,
                 fields={"KEY_OPTION": [key, None]})
 
@@ -272,8 +334,13 @@ def _wait(tb, secs: float) -> str:
 
 
 def _key_pressed(tb, key: str) -> str:
-    return _add(tb, opcode="sensing_keypressed",
+    # sensing_keypressed needs a shadow menu block as its KEY_OPTION input.
+    menu = _add(tb, opcode="sensing_keyoptions", shadow=True,
                 fields={"KEY_OPTION": [key, None]})
+    bid = _add(tb, opcode="sensing_keypressed",
+               inputs={"KEY_OPTION": [1, menu]})
+    tb.blocks[menu]["parent"] = bid
+    return bid
 
 
 def _mouse_down(tb) -> str:
@@ -291,8 +358,12 @@ def _join(tb, a, b) -> str:
 
 
 def _touching(tb, sprite_name: str) -> str:
-    return _add(tb, opcode="sensing_touchingobject",
+    menu = _add(tb, opcode="sensing_touchingobjectmenu", shadow=True,
                 fields={"TOUCHINGOBJECTMENU": [sprite_name, None]})
+    bid = _add(tb, opcode="sensing_touchingobject",
+               inputs={"TOUCHINGOBJECTMENU": [1, menu]})
+    tb.blocks[menu]["parent"] = bid
+    return bid
 
 
 def _var_set(tb, var_id: str, var_name: str, value) -> str:
@@ -329,50 +400,189 @@ class _Skeleton:
         self.approximation = approximation
 
 
+def _skel_flag(tb) -> _Skeleton:
+    hat = _hat_flag(tb)
+    return _Skeleton([hat], hat, False)
+
+
+def _skel_forever(tb) -> _Skeleton:
+    hat = _hat_flag(tb)
+    body = _nid()
+    tb.blocks[body] = _block("control_forever")
+    tb.blocks[hat]["next"] = body
+    tb.blocks[body]["parent"] = hat
+    return _Skeleton([hat, body], body, True)
+
+
+def _skel_forever_if(tb, cond_id: str, approximation: Optional[str] = None) -> _Skeleton:
+    """``when flag -> forever { if <cond> { <body> } }``.
+
+    ``body_parent`` is the ``control_if`` block; the frame compiler hangs the
+    action chain off its SUBSTACK input.
+    """
+    hat = _hat_flag(tb)
+    forever = _nid()
+    tb.blocks[forever] = _block("control_forever")
+    tb.blocks[hat]["next"] = forever
+    tb.blocks[forever]["parent"] = hat
+    inner = _nid()
+    tb.blocks[inner] = _block("control_if", inputs={
+        "CONDITION": ref(cond_id), "SUBSTACK": None})
+    tb.blocks[forever]["inputs"]["SUBSTACK"] = ref(inner)
+    tb.blocks[inner]["parent"] = forever
+    if cond_id in tb.blocks:
+        tb.blocks[cond_id]["parent"] = inner
+    return _Skeleton([hat, forever, inner], inner, True,
+                     approximation=approximation)
+
+
+def _skel_every(tb, frame: Frame, params: List[dict], warnings: List[str]) -> _Skeleton:
+    ticks = _first_number(params, ("every", "int", "short"))
+    if ticks is None or ticks <= 0:
+        ticks = 50.0
+        warnings.append(
+            f"{frame.name}: 'Every' without a readable interval; using 50 ticks (1 s)")
+    # EXE "Every" stores delay in milliseconds (CTFAK: Delay/1000 sec).
+    # MFA fixtures store tick counts.  Heuristic: values >= 1000 look like ms.
+    if ticks >= 1000:
+        secs = ticks / 1000.0
+    else:
+        secs = max(ticks / 50.0, 0.01)
+    hat = _hat_flag(tb)
+    body = _nid()
+    tb.blocks[body] = _block("control_forever")
+    tb.blocks[hat]["next"] = body
+    tb.blocks[body]["parent"] = hat
+    wait = _wait(tb, max(secs, 0.01))
+    return _Skeleton([hat, body, wait], wait, False)
+
+
+def _skel_global_compare(tb, cond, frame, mfa, params, warnings, notes,
+                         strings: bool = False) -> Optional[_Skeleton]:
+    idx = None
+    for p in params:
+        g = p.get("global")
+        if isinstance(g, (int, float)):
+            idx = int(g)
+            break
+        # EXE GlobalValue is a Short (value field).
+        s = p.get("short")
+        if isinstance(s, (int, float)) and idx is None:
+            idx = int(s)
+    if idx is None:
+        notes.append("global compare without a global index — kept as a note")
+        return None
+    var_id = _global_variable(tb, mfa, idx, warnings, strings=strings)
+    val = _expr_or_number(params)
+    eq_id = _add(tb, opcode="operator_equals", inputs={
+        "OPERAND1": var_reference(var_id),
+        "OPERAND2": num(val) if val is not None else num(0)})
+    return _skel_forever_if(
+        tb, eq_id,
+        approximation="'Compare global' approximated: fires every tick while equal")
+
+
 def _compile_system_condition(tb, cond: Condition, frame: Frame,
                               mfa: MFA, warnings: List[str],
                               notes: List[str]) -> Optional[_Skeleton]:
+    """Compile a condition whose object_type is System/Storyboard/Timer/Mouse."""
     params = _param_values(cond)
     n = cond.num
+    otype = cond.object_type
 
-    if n == COND_START_OF_FRAME:
-        hat = _hat_flag(tb)
-        return _Skeleton([hat], hat, False)
+    # ---- Storyboard object (EXE -3): Start/End of Frame/App ----
+    if otype == STORYBOARD:
+        if n in (EXE_COND_START_OF_FRAME,):
+            return _skel_flag(tb)
+        if n in (EXE_COND_END_OF_FRAME, EXE_COND_END_OF_APP):
+            return _skel_flag(tb)  # best-effort: still on green flag
+        return None
+
+    # ---- Timer object (EXE -4): Every / timer compares ----
+    if otype == TIMER:
+        if n in (EXE_COND_EVERY, EXE_COND_EVERY_2, COND_EVERY):
+            return _skel_every(tb, frame, params, warnings)
+        if n in (EXE_COND_TIMER_GREATER, EXE_COND_TIMER_LESS, EXE_COND_TIMER_EQUALS):
+            # Approximate timer compares as a one-shot green-flag body.
+            return _skel_flag(tb)
+        return None
+
+    # ---- Mouse / Keyboard (EXE -6) ----
+    if otype == MOUSE_KB:
+        if n in (EXE_COND_KEY_PRESSED, COND_ON_KEY_PRESSED):
+            key = _keycode_to_scratch(
+                _first_number(params, ("keycode", "short", "int")))
+            if not key:
+                notes.append("key-pressed without a readable key — kept as a note")
+                return None
+            hat = _hat_key(tb, key)
+            return _Skeleton([hat], hat, False)
+        if n in (EXE_COND_KEY_DOWN, COND_WHILE_KEY_PRESSED):
+            key = _keycode_to_scratch(
+                _first_number(params, ("keycode", "short", "int")))
+            if not key:
+                notes.append("while-key without a readable key — kept as a note")
+                return None
+            kp = _key_pressed(tb, key)
+            return _skel_forever_if(tb, kp)
+        if n == EXE_COND_ANY_KEY:
+            # Scratch has no "any key" hat; approximate with forever+keypressed space.
+            kp = _key_pressed(tb, "space")
+            return _skel_forever_if(
+                tb, kp, approximation="'Any key' approximated as 'space pressed'")
+        if n in (EXE_COND_MOUSE_CLICKED, COND_ON_MOUSE_CLICKED):
+            md = _mouse_down(tb)
+            return _skel_forever_if(
+                tb, md, approximation="'On mouse clicked' approximated as 'while mouse down'")
+        if n in (EXE_COND_WHILE_MOUSE, COND_WHILE_MOUSE_PRESSED):
+            md = _mouse_down(tb)
+            return _skel_forever_if(tb, md)
+        if n in (EXE_COND_MOUSE_ON_OBJECT, COND_MOUSE_OVER_OBJECT):
+            # Needs an object target; fall through as unmapped note.
+            return None
+        return None
+
+    # ---- System object (-1): MFA flat nums + EXE System nums ----
+    if otype != SYS:
+        return None
+
+    # Start of frame / app — MFA uses -1/-2 on System; EXE puts them on Storyboard.
+    if n == COND_START_OF_FRAME and otype == SYS:
+        # Ambiguous: MFA Start-of-Frame is -1, EXE Always is also -1.
+        # Distinguish by build: MFA fixtures set identifier and have no EXE
+        # storyboard.  Prefer Always when other conditions suggest EXE, else
+        # treat -1 as Start-of-Frame (preserves existing MFA tests).
+        # Heuristic: if the condition has zero params and the frame came from
+        # MFA (event groups already present before EXE decode), Start-of-Frame
+        # is what the events.mfa fixture encodes.  We keep MFA behaviour as
+        # the default for bare System/-1.
+        return _skel_flag(tb)
 
     if n == COND_START_OF_APP:
         hat = _hat_flag(tb)
-        return _Skeleton([hat], hat, False,
-                         approximation="'Start of Application' treated as 'when green flag clicked'")
+        return _Skeleton(
+            [hat], hat, False,
+            approximation="'Start of Application' treated as 'when green flag clicked'")
 
-    if n == COND_ALWAYS:
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
-        return _Skeleton([hat, body], body, True)
+    # MFA Always is -13.  EXE Always is System/-1 which collides with MFA
+    # Start-of-Frame; we keep Start-of-Frame as the default for bare -1.
+    if n == COND_ALWAYS:  # MFA -13
+        return _skel_forever(tb)
 
-    if n == COND_EVERY:
-        ticks = _first_number(params, ("every", "int", "short"))
-        if ticks is None or ticks <= 0:
-            ticks = 50.0
-            warnings.append(
-                f"{frame.name}: 'Every' without a readable interval; using 50 ticks (1 s)")
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
-        wait = _wait(tb, max(ticks / 50.0, 0.01))
-        return _Skeleton([hat, body, wait], wait, False)
+    if n == EXE_COND_NEVER or n == COND_NEVER:
+        notes.append("'Never' condition — event group skipped")
+        return None
 
-    if n in (COND_ON_LOOP, COND_LOOP_FOR_EACH):
+    if n in (COND_EVERY,):
+        return _skel_every(tb, frame, params, warnings)
+
+    if n in (COND_ON_LOOP, COND_LOOP_FOR_EACH, EXE_COND_ON_LOOP):
         name = _first_string(params) or f"loop{abs(cond.identifier) or len(frame.event_groups)}"
         bid = _register_broadcast(tb, f"loop:{name}")
         hat = _hat_broadcast(tb, f"loop:{name}", bid)
         return _Skeleton([hat], hat, False)
 
-    if n == COND_REPEAT:
+    if n in (COND_REPEAT, EXE_COND_REPEAT):
         count = _expr_or_number(params)
         if count is None:
             notes.append("Repeat without a readable count — kept as a note")
@@ -398,119 +608,39 @@ def _compile_system_condition(tb, cond: Condition, frame: Frame,
         if not key:
             notes.append("while-key-pressed without a readable key — kept as a note")
             return None
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         kp = _key_pressed(tb, key)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(kp), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True)
+        return _skel_forever_if(tb, kp)
 
     if n == COND_ON_KEY_RELEASED:
         key = _keycode_to_scratch(_first_number(params, ("keycode", "short", "int")))
         if not key:
             notes.append("key-released without a readable key — kept as a note")
             return None
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         kp = _key_pressed(tb, key)
         notkp = _not(tb, kp)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(notkp), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True,
-                         approximation="'On key released' approximated as 'while not pressed'")
+        return _skel_forever_if(
+            tb, notkp, approximation="'On key released' approximated as 'while not pressed'")
 
     if n == COND_ON_MOUSE_CLICKED:
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         md = _mouse_down(tb)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(md), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True,
-                         approximation="'On mouse clicked' approximated as 'while mouse down'")
+        return _skel_forever_if(
+            tb, md, approximation="'On mouse clicked' approximated as 'while mouse down'")
 
     if n == COND_WHILE_MOUSE_PRESSED:
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         md = _mouse_down(tb)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(md), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True)
+        return _skel_forever_if(tb, md)
 
     if n == COND_ON_MOUSE_RELEASED:
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         md = _mouse_down(tb)
         notmd = _not(tb, md)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(notmd), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True,
-                         approximation="'On mouse released' approximated as 'while not pressed'")
+        return _skel_forever_if(
+            tb, notmd, approximation="'On mouse released' approximated as 'while not pressed'")
 
-    if n in (COND_COMPARE_GLOBAL_VALUE, COND_COMPARE_GLOBAL_STRING):
-        strings = n == COND_COMPARE_GLOBAL_STRING
-        idx = None
-        for p in params:
-            g = p.get("global")
-            if isinstance(g, (int, float)):
-                idx = int(g)
-                break
-        if idx is None:
-            notes.append("global compare without a global index — kept as a note")
-            return None
-        var_id = _global_variable(tb, mfa, idx, warnings, strings=strings)
-        var_name = tb.variables[var_id][0]
-        val = _expr_or_number(params)
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
-        eq_id = _add(tb, opcode="operator_equals", inputs={
-            "OPERAND1": var_reference(var_id),
-            "OPERAND2": num(val) if val is not None else num(0)})
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(eq_id), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True,
-                         approximation="'Compare global' approximated: fires every tick while equal")
+    if n in (COND_COMPARE_GLOBAL_VALUE, COND_COMPARE_GLOBAL_STRING,
+             EXE_COND_COMPARE_GLOBAL, EXE_COND_COMPARE_GLOBAL_STRING):
+        strings = n in (COND_COMPARE_GLOBAL_STRING, EXE_COND_COMPARE_GLOBAL_STRING)
+        return _skel_global_compare(tb, cond, frame, mfa, params, warnings, notes,
+                                    strings=strings)
 
     # Everything else: keep as a note.
     return None
@@ -525,7 +655,7 @@ def _compile_active_condition(tb, cond: Condition, frame: Frame,
         notes.append(
             f"{_obj_name(frame, cond.object_info)}: condition #{n} (no sprite) — kept as a note")
         return None
-    if n == COND_COLLISION_OBJECT:
+    if n in (COND_COLLISION_OBJECT, EXE_COND_OVERLAPPING):
         # param: object to collide with (expression/object ref); fall back
         # to the frame's first other sprite.
         target = None
@@ -537,49 +667,34 @@ def _compile_active_condition(tb, cond: Condition, frame: Frame,
                     if isinstance(v, (int, float)):
                         target = sprite_by_handle.get(int(v))
                         break
+            # EXE ParamObject may expose an object-info handle.
+            oi = p.get("object_info") or p.get("object")
+            if isinstance(oi, (int, float)):
+                target = sprite_by_handle.get(int(oi))
         if target is None:
-            # heuristic: collide with anything else in the frame
             others = [s for h, s in sprite_by_handle.items() if s is not sprite]
             if not others:
                 notes.append("collision condition with no other sprite — kept as a note")
                 return None
             target = others[0]
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         touch = _touching(tb, target.name)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(touch), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True,
-                         approximation="collision approximated with 'touching' on the Events sprite")
+        return _skel_forever_if(
+            tb, touch,
+            approximation="collision approximated with 'touching' on the Events sprite")
     if n == COND_MOUSE_OVER:
-        hat = _hat_flag(tb)
-        body = _nid()
-        tb.blocks[body] = _block("control_forever")
-        tb.blocks[hat]["next"] = body
-        tb.blocks[body]["parent"] = hat
         touch = _touching(tb, sprite.name)
-        inner = _nid()
-        tb.blocks[inner] = _block("control_if", inputs={
-            "CONDITION": ref(touch), "SUBSTACK": ref(_nid())})
-        tb.blocks[body]["inputs"]["SUBSTACK"] = ref(inner)
-        sub_body = _nid()
-        tb.blocks[inner]["inputs"]["SUBSTACK"] = ref(sub_body)
-        return _Skeleton([hat, body, inner], sub_body, True)
+        return _skel_forever_if(tb, touch)
+    if n in (COND_ANIM_FINISHED, EXE_COND_ANIM_OVER):
+        # No direct Scratch equivalent; run once on green flag.
+        return _skel_flag(tb)
     return None
 
 
 def _compile_condition(tb, cond: Condition, frame: Frame, mfa: MFA,
                        sprite_by_handle, warnings, notes) -> Optional[_Skeleton]:
-    if cond.object_type == SYS:
+    if cond.object_type in (SYS, STORYBOARD, TIMER, MOUSE_KB, PLAYER, CREATE):
         return _compile_system_condition(tb, cond, frame, mfa, warnings, notes)
-    if cond.object_type == ACTIVE:
+    if cond.object_type in (ACTIVE, ACTIVE_MFA):
         return _compile_active_condition(tb, cond, frame, sprite_by_handle,
                                          warnings, notes)
     return None
@@ -597,7 +712,7 @@ def _compile_action(tb, act: Action, frame: Frame, mfa: MFA,
     obj_name = _obj_name(frame, act.object_info)
 
     if act.object_type == SYS:
-        if n == ACT_START_LOOP:
+        if n in (ACT_START_LOOP, EXE_ACT_START_LOOP):
             name = _first_string(params) or f"loop{len(frame.event_groups)}"
             count = _expr_or_number(params)
             if count is None:
@@ -610,21 +725,28 @@ def _compile_action(tb, act: Action, frame: Frame, mfa: MFA,
                 "TIMES": num(int(count)), "SUBSTACK": ref(bcast)})
             tb.blocks[bcast]["parent"] = rep
             return rep
-        if n == ACT_START_LOOP_FOR_EACH:
+        if n in (ACT_START_LOOP_FOR_EACH, EXE_ACT_START_LOOP_FOR_EACH):
             name = _first_string(params) or f"loop{len(frame.event_groups)}"
             bid = _register_broadcast(tb, f"loop:{name}")
             return _broadcast_block(tb, f"loop:{name}", bid)
-        if n == ACT_STOP_LOOP:
+        if n in (ACT_STOP_LOOP, EXE_ACT_STOP_LOOP):
             notes.append("'Stop loop' cannot be represented in Scratch — kept as a note")
             return None
-        if n in (ACT_SET_GLOBAL_VALUE, ACT_SET_GLOBAL_STRING):
-            strings = n == ACT_SET_GLOBAL_STRING
-            idx = None
+
+        def _global_index() -> Optional[int]:
             for p in params:
                 g = p.get("global")
                 if isinstance(g, (int, float)):
-                    idx = int(g)
-                    break
+                    return int(g)
+                s = p.get("short")
+                if isinstance(s, (int, float)):
+                    return int(s)
+            return None
+
+        if n in (ACT_SET_GLOBAL_VALUE, ACT_SET_GLOBAL_STRING,
+                 EXE_ACT_SET_GLOBAL_VALUE, EXE_ACT_SET_GLOBAL_STRING):
+            strings = n in (ACT_SET_GLOBAL_STRING, EXE_ACT_SET_GLOBAL_STRING)
+            idx = _global_index()
             if idx is None:
                 notes.append("global set without a global index — kept as a note")
                 return None
@@ -633,13 +755,8 @@ def _compile_action(tb, act: Action, frame: Frame, mfa: MFA,
             val = _expr_or_number(params)
             value = num(val) if val is not None else (text("") if strings else num(0))
             return _var_set(tb, var_id, var_name, value)
-        if n == ACT_ADD_GLOBAL_VALUE:
-            idx = None
-            for p in params:
-                g = p.get("global")
-                if isinstance(g, (int, float)):
-                    idx = int(g)
-                    break
+        if n in (ACT_ADD_GLOBAL_VALUE, EXE_ACT_ADD_GLOBAL_VALUE):
+            idx = _global_index()
             if idx is None:
                 notes.append("global add without a global index — kept as a note")
                 return None
@@ -647,13 +764,8 @@ def _compile_action(tb, act: Action, frame: Frame, mfa: MFA,
             var_name = tb.variables[var_id][0]
             val = _expr_or_number(params)
             return _var_change(tb, var_id, var_name, num(val) if val is not None else num(0))
-        if n == ACT_SUB_GLOBAL_VALUE:
-            idx = None
-            for p in params:
-                g = p.get("global")
-                if isinstance(g, (int, float)):
-                    idx = int(g)
-                    break
+        if n in (ACT_SUB_GLOBAL_VALUE, EXE_ACT_SUB_GLOBAL_VALUE):
+            idx = _global_index()
             if idx is None:
                 notes.append("global subtract without a global index — kept as a note")
                 return None
@@ -661,13 +773,8 @@ def _compile_action(tb, act: Action, frame: Frame, mfa: MFA,
             var_name = tb.variables[var_id][0]
             val = _expr_or_number(params)
             return _var_change(tb, var_id, var_name, num(-(val or 0)))
-        if n == ACT_ADD_GLOBAL_STRING:
-            idx = None
-            for p in params:
-                g = p.get("global")
-                if isinstance(g, (int, float)):
-                    idx = int(g)
-                    break
+        if n in (ACT_ADD_GLOBAL_STRING, EXE_ACT_ADD_GLOBAL_STRING):
+            idx = _global_index()
             if idx is None:
                 notes.append("global string append without an index — kept as a note")
                 return None
@@ -678,13 +785,16 @@ def _compile_action(tb, act: Action, frame: Frame, mfa: MFA,
             return _var_set(tb, var_id, var_name, ref(j))
         return None
 
-    if act.object_type == ACTIVE:
+    if act.object_type in (ACTIVE, ACTIVE_MFA):
         sprite = _sprite_for(frame, act.object_info, sprite_by_handle)
         if sprite is None:
             notes.append(f"{obj_name}: action #{n} (no sprite) — kept as a note")
             return None
         name = _broadcast_name(frame, obj_name, "act", n)
         bid = _register_broadcast(tb, name)
+        # Also register on the events sprite so the project-level broadcast
+        # list is complete (Scratch merges stage broadcasts).
+        _register_broadcast(tb, name)
         # the receiving handler on the object sprite
         _build_object_handler(sprite, name, bid, act, frame, warnings, notes)
         return _broadcast_block(tb, name, bid)

@@ -126,7 +126,7 @@ def decode_bmp(width: int, height: int, mode: int, flags: int, body: bytes, tran
         # Fusion 2.5+ EXEs: 32 bits per pixel, 8 bits per channel (BGRA).
         rgba, used = read_32bpp(body, width, height)
         if flags & 0x80:  # RGBA flag: the 4th byte is the alpha channel
-            return encode_png(width, height, rgba)
+            return encode_png(width, height, _ensure_visible(rgba, width, height))
         if not (flags & 0x10):  # no separate alpha plane: use transparent color
             arr = bytearray(rgba)
             if transparent is not None:
@@ -140,10 +140,15 @@ def decode_bmp(width: int, height: int, mode: int, flags: int, body: bytes, tran
             else:
                 for i in range(width * height):
                     arr[i * 4 + 3] = 255
-            return encode_png(width, height, bytes(arr))
+            return encode_png(width, height, _ensure_visible(bytes(arr), width, height))
         # Alpha flag without RGBA: a separate alpha plane follows the pixels.
     elif mode == 16:
+        # CTFAK treats 2.5+ decoded buffers as mode 16 (= 32-bit BGRA with
+        # alpha already interleaved).  Honour an alpha plane if flagged,
+        # otherwise keep the 4th byte as alpha.
         rgba, used = read_32bpp(body, width, height)
+        if not (flags & 0x10):
+            return encode_png(width, height, _ensure_visible(rgba, width, height))
     elif mode == 0:
         # some MFA files store a 32-bit image with mode 0
         rgba, used = read_32bpp(body, width, height)
@@ -165,4 +170,29 @@ def decode_bmp(width: int, height: int, mode: int, flags: int, body: bytes, tran
                 arr[i * 4 + 3] = ta
         rgba = bytes(arr)
 
-    return encode_png(width, height, rgba)
+    return encode_png(width, height, _ensure_visible(rgba, width, height))
+
+
+def _ensure_visible(rgba: bytes, width: int, height: int) -> bytes:
+    """If every pixel is fully transparent but colour data is present, force
+    opaque alpha.  Some Fusion banks leave alpha at 0 while still storing
+    RGB, which made Scratch costumes load as blank invisible sprites.
+    """
+    if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return rgba
+    n = width * height
+    any_opaque = False
+    any_color = False
+    for i in range(n):
+        j = i * 4
+        if rgba[j + 3] > 0:
+            any_opaque = True
+            break
+        if rgba[j] or rgba[j + 1] or rgba[j + 2]:
+            any_color = True
+    if any_opaque or not any_color:
+        return rgba
+    arr = bytearray(rgba)
+    for i in range(n):
+        arr[i * 4 + 3] = 255
+    return bytes(arr)
