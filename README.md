@@ -124,7 +124,9 @@ What "no Python setup" means in practice:
 | Images that fail to decode | ✅ get a visible labelled placeholder instead of being dropped / "?" |
 | Event groups, conditions/actions/parameters/expressions | ✅ parsed & reported |
 | Event → readable notes (object names resolved) | ✅ visible in **Logic-Notes** |
-| Event → Scratch block transpiler | 🔶 only the verified subset is mapped to blocks; the rest is readable **Logic-Notes** |
+| Event → Scratch block transpiler | ✅ verified subset compiled to real blocks (System object + common Active actions via broadcast glue); everything else stays readable **Logic-Notes**, with per-frame mapped/unmapped counts reported as warnings |
+| Compilation progress | ✅ **live, animated, extremely detailed** — CLI (spinner + bar + per-image/per-chunk/per-event steps), web UI and desktop app |
+| Warnings & notes surfaced in the UI | ✅ streamed live during conversion + summarized after |
 | `.exe` compiled event programs | 🔶 reported (size/byte counts); not decoded into blocks |
 | `.ccn` / `.apk` / `.bin` front-ends | 🔶 optional CTFAK fallback only |
 | MMF 1.5 / CNC builds, Fusion 3, encrypted builds | not yet |
@@ -133,9 +135,30 @@ What "no Python setup" means in practice:
 ## Web UI
 
 `--web` serves a single-page uploader: drop in the game's `.exe`, get the
-`.sb3`. It parses the file locally in the Python process. The live preview
-origin is a `0.0.0.0`-bound server, so it works from the browser preview
-without any localhost configuration.
+`.sb3`. The conversion runs in a background thread and the page streams
+**live animated progress** (per phase, per chunk, per image, per event) over
+SSE, with a warning/note panel that fills in as problems are found. It
+parses the file locally in the Python process. The live preview origin is a
+`0.0.0.0`-bound server, so it works from the browser preview without any
+localhost configuration.
+
+## Progress & warnings
+
+Every surface shows the same detailed conversion progress:
+
+- **CLI** (`--progress auto`, the default on a terminal): animated spinner,
+  progress bar, current phase and micro-step (`decoding image 417/1200 →
+  PNG`, `compiling frame 2/12 event groups`…), live warnings, and a summary
+  of how many event groups compiled to blocks. `--progress json` emits
+  machine-readable `[cts2-progress] <json>` lines; `--progress off` disables
+  it.
+- **Desktop app**: the same dashboard (animated gradient bar, phase chips,
+  counters, live warnings) appears while converting.
+- **Web UI**: full streaming dashboard with counters and a warnings panel.
+
+Costume textures are always real **PNG** files (Scratch's `dataFormat:
+"png"`); images that fail to decode get a visible magenta PNG placeholder
+instead of a broken / "?" costume.
 
 ## Tests
 

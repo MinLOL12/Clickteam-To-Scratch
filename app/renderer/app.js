@@ -55,6 +55,106 @@
     if (added) { renderFiles(); }
   }
 
+  // ------------------------------------------------------------------
+  // animated conversion progress
+  // ------------------------------------------------------------------
+  const PHASES = [
+    ['detect','Detect input'],['read','Read file'],['pack','EXE pack'],['gamedata','Game data'],
+    ['chunks','Decrypt chunks'],['objects','Objects'],['frames','Frames'],['images','Images → PNG'],
+    ['sounds','Sounds'],['events','Events'],['build','Build project'],['transpile','Events → Blocks'],
+    ['zip','Pack .sb3'],
+  ];
+  const ORDER = PHASES.map((p) => p[0]);
+  (function buildPhases() {
+    const box = $('phases');
+    for (const [id, label] of PHASES) {
+      const p = document.createElement('span');
+      p.className = 'phase'; p.dataset.id = id;
+      const d = document.createElement('span'); d.className = 'dot';
+      p.append(d, document.createTextNode(label));
+      box.appendChild(p);
+    }
+  })();
+
+  function setPhase(id, cls) {
+    const p = document.querySelector(`.phase[data-id="${id}"]`);
+    if (p) { p.classList.remove('active', 'done'); if (cls) p.classList.add(cls); }
+  }
+
+  const seenWarns = new Set();
+  function addEntry(type, text) {
+    if (seenWarns.has(text)) return;
+    seenWarns.add(text);
+    const list = $('entries');
+    const e = document.createElement('div');
+    e.className = 'entry ' + type;
+    const ic = document.createElement('span'); ic.className = 'ic';
+    ic.textContent = type === 'warn' ? '⚠' : '·';
+    e.append(ic, document.createTextNode(text));
+    list.appendChild(e);
+    $('warnCard').classList.remove('hidden');
+    $('warnCount').textContent = list.querySelectorAll('.entry.warn').length + ' warning(s)';
+    list.scrollTop = list.scrollHeight;
+  }
+
+  let convT0 = 0;
+  function convStart(fileName) {
+    $('convPanel').classList.remove('hidden');
+    $('warnCard').classList.add('hidden');
+    $('entries').innerHTML = '';
+    seenWarns.clear();
+    $('bar').classList.remove('done', 'err');
+    $('fileName').textContent = '— ' + fileName;
+    $('pctBig').textContent = '0%'; $('overallPct').textContent = '0%';
+    $('phaseTitle').textContent = 'Starting…';
+    $('stepText').textContent = ''; $('barLabel').textContent = 'starting…';
+    $('tickCount').textContent = ''; $('counters').innerHTML = '';
+    document.querySelectorAll('.phase').forEach((p) => p.classList.remove('active', 'done'));
+    convT0 = performance.now();
+  }
+
+  function convRender(ev) {
+    if (!ev) return;
+    const pct = Math.min(100, ev.overall || 0);
+    $('pctBig').textContent = Math.round(pct) + '%';
+    $('overallPct').textContent = Math.round(pct) + '%';
+    $('bar').firstElementChild.style.width = pct + '%';
+    $('phaseTitle').textContent = ev.phase_title || '';
+    if (ev.step) $('stepText').textContent = ev.step;
+    if (ev.step || ev.phase_title) $('barLabel').textContent = ev.step || ev.phase_title;
+    $('elapsed').textContent = ((performance.now() - convT0) / 1000).toFixed(1) + 's';
+    if (ev.phase) {
+      const idx = ORDER.indexOf(ev.phase);
+      setPhase(ev.phase, 'active');
+      for (let i = 0; i < ORDER.length; i++) {
+        if (ORDER[i] !== ev.phase && i < idx) setPhase(ORDER[i], 'done');
+        if (ORDER[i] !== ev.phase && i > idx) setPhase(ORDER[i], null);
+      }
+    }
+    for (const w of ev.warnings || []) addEntry('warn', w);
+    if (ev.type === 'done' && ev.stats) {
+      const box = $('counters'); box.innerHTML = '';
+      const counters = [['images','Images → PNG'],['sprites','Sprites'],['sounds','Sounds'],
+        ['events_mapped','Events → blocks'],['blocks','Blocks emitted'],['frames','Frames']];
+      for (const [key, label] of counters) {
+        const v = ev.stats[key];
+        if (v === undefined) continue;
+        const c = document.createElement('div'); c.className = 'cnt';
+        const b = document.createElement('b'); b.textContent = v;
+        const s = document.createElement('span'); s.textContent = label;
+        c.append(b, s); box.appendChild(c);
+      }
+      $('bar').classList.add('done');
+      $('pctBig').textContent = '100%'; $('overallPct').textContent = '100%';
+      $('bar').firstElementChild.style.width = '100%';
+      document.querySelectorAll('.phase').forEach((p) => p.classList.add('done'));
+      $('phaseTitle').textContent = 'Done ✓';
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // conversion
+  // ------------------------------------------------------------------
   async function convertOne(f) {
     if (state.busy) return;
     const save = await window.cts.pickSave(f.name);
@@ -63,17 +163,30 @@
     f.status = 'busy'; f.statusLabel = 'converting…';
     renderFiles();
     addLog(`\n=== ${f.name} -> ${save.filePath.split(/[\\/]/).pop()} ===`);
+    convStart(f.name);
     const res = await window.cts.convert(f.path, save.filePath);
     state.busy = false;
     if (res.ok) {
       f.status = 'done'; f.statusLabel = 'done (' + (res.size/1024).toFixed(0) + ' kB)';
       addLog('[done] ' + res.output);
+      convRender({ type: 'done', stats: res.report || {}, warnings: res.warnings || [] });
+      for (const w of res.warnings || []) addEntry('warn', w);
+      if (res.report && res.report.notes && res.report.notes.length) {
+        addLog(res.report.notes.join('\n'));
+      }
     } else {
       f.status = 'err'; f.statusLabel = 'error';
       addLog('[error] ' + res.error);
+      $('bar').classList.add('err');
+      $('phaseTitle').textContent = 'Conversion failed';
+      $('stepText').textContent = res.error;
     }
     renderFiles();
   }
+
+  window.cts.onConvertProgress((ev) => {
+    if (state.busy) convRender(ev);
+  });
 
   $('addBtn').onclick = async () => addFiles(await window.cts.pickFiles());
   $('clearBtn').onclick = () => { state.files = []; renderFiles(); };

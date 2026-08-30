@@ -83,12 +83,14 @@ def find_game_in_folder(folder: str) -> Optional[str]:
 # --------------------------------------------------------------------------
 
 def _exe_to_mfa_builtin(exe_path: str, data: bytes,
-                        notes: list) -> Optional[MFA]:
+                        notes: list, progress=None) -> Optional[MFA]:
     """Fast path: recover the game using only the built-in readers.
 
     1. Raw MFA inside the EXE pack, or
     2. the native PAME/PAMU game-data reader (full rebuild, no tools).
     """
+    from .progress import NULL as _NULL
+    progress = progress or _NULL
     try:
         found = exe_pack.extract_mfa_from_exe(data)
     except Exception as exc:  # noqa: BLE001
@@ -100,8 +102,10 @@ def _exe_to_mfa_builtin(exe_path: str, data: bytes,
             f"extracted raw MFA ({name}) from the EXE pack without CTFAK"
         )
         return load_mfa_bytes(mfa_data)
+    progress.phase("gamedata", total=1)
+    progress.step("locating PAME/PAMU game data")
     try:
-        mfa, gnotes = gamedata.load_game_data_from_exe(data)
+        mfa, gnotes = gamedata.load_game_data_from_exe(data, progress=progress)
     except gamedata.GameDataError as exc:
         notes.append(f"built-in game-data reader: {exc}")
         return None
@@ -145,14 +149,21 @@ def _via_ctfak(path_for_ctfak: str, ctfak_hint: Optional[str],
 
 
 def load_from_bytes(data: bytes, input_name: str,
-                    ctfak: Optional[str] = None) -> Tuple[MFA, List[str]]:
+                    ctfak: Optional[str] = None,
+                    progress=None) -> Tuple[MFA, List[str]]:
     """Load any supported input from memory. Returns ``(mfa, notes)``."""
+    from .progress import NULL as _NULL
+    progress = progress or _NULL
     notes: List[str] = []
     kind = detect.detect_bytes(data)
+    progress.phase("detect", total=1)
+    progress.step(f"detected: {detect.describe(kind)}")
     if kind == detect.KIND_MFA:
         return load_mfa_bytes(data), notes
     if kind == detect.KIND_EXE:
-        mfa = _exe_to_mfa_builtin(input_name, data, notes)
+        progress.phase("pack", total=1)
+        progress.step("scanning EXE for Fusion pack / game data")
+        mfa = _exe_to_mfa_builtin(input_name, data, notes, progress)
         if mfa is not None:
             return mfa, notes
         notes.append("built-in readers could not convert this EXE")
@@ -164,7 +175,9 @@ def load_from_bytes(data: bytes, input_name: str,
             fh.write(data)
         return _via_ctfak(src, ctfak, notes), notes
     if kind == detect.KIND_GAMEDATA:
-        mfa, gnotes = gamedata.load_game_data_from_exe(data)
+        progress.phase("gamedata", total=1)
+        progress.step("reading raw Fusion 2.5 game data (PAME/PAMU)")
+        mfa, gnotes = gamedata.load_game_data_from_exe(data, progress=progress)
         notes.append(
             "read the raw Fusion 2.5 game data (PAME/PAMU) directly — "
             "no .mfa, no CTFAK"
@@ -173,7 +186,7 @@ def load_from_bytes(data: bytes, input_name: str,
         return mfa, notes
     # Unknown content. Try the built-in readers anyway (cheap, in case the
     # bytes are exotic), then the optional CTFAK fallback.
-    mfa = _exe_to_mfa_builtin(input_name, data, notes)
+    mfa = _exe_to_mfa_builtin(input_name, data, notes, progress)
     if mfa is not None:
         return mfa, notes
     if not (ctfak or ctfak_mod.find_ctfak_binary()):
@@ -185,9 +198,12 @@ def load_from_bytes(data: bytes, input_name: str,
     return _via_ctfak(src, ctfak, notes), notes
 
 
-def load_project(path: str, ctfak: Optional[str] = None) -> Tuple[MFA, List[str]]:
+def load_project(path: str, ctfak: Optional[str] = None,
+                 progress=None) -> Tuple[MFA, List[str]]:
     """Load any supported input: a game .exe, an .mfa, a data file — or a
     whole extracted game *folder*, whose game file is found automatically."""
+    from .progress import NULL as _NULL
+    progress = progress or _NULL
     if os.path.isdir(path):
         candidates = iter_folder_candidates(path)
         if not candidates:
@@ -199,10 +215,12 @@ def load_project(path: str, ctfak: Optional[str] = None) -> Tuple[MFA, List[str]
         failures: List[str] = []
         for cand in candidates:
             notes: List[str] = []
+            progress.phase("read", total=1)
+            progress.step(f"trying '{os.path.basename(cand)}'")
             try:
                 with open(cand, "rb") as fh:
                     data = fh.read()
-                mfa, notes = load_from_bytes(data, cand, ctfak)
+                mfa, notes = load_from_bytes(data, cand, ctfak, progress)
             except Exception as exc:  # noqa: BLE001 - try the next candidate
                 failures.append(f"{os.path.basename(cand)}: {exc}")
                 continue
@@ -213,9 +231,11 @@ def load_project(path: str, ctfak: Optional[str] = None) -> Tuple[MFA, List[str]
             "no convertible game found in folder '{}'. Tried:\n  {}".format(
                 path, "\n  ".join(failures or ["(no candidate files)"]))
         )
+    progress.phase("read", total=1)
+    progress.step(f"reading {os.path.basename(path)}")
     with open(path, "rb") as fh:
         data = fh.read()
-    return load_from_bytes(data, path, ctfak)
+    return load_from_bytes(data, path, ctfak, progress)
 
 
 # Back-compat alias (the old name is used by older call sites).
@@ -224,28 +244,47 @@ _load_mfa_from_any = load_project
 
 def convert_file(input_path: str, output_path: Optional[str] = None,
                  report_path: Optional[str] = None,
-                 ctfak: Optional[str] = None) -> dict:
+                 ctfak: Optional[str] = None,
+                 progress=None) -> dict:
     """Convert a game .exe / .mfa / data file / folder to an SB3 project.
 
     Returns {'project': bytes, 'mfa': MFA, 'report': dict}.
     """
-    mfa, notes = load_project(input_path, ctfak)
-    sb3, report = build_project(mfa)
+    from .progress import NULL as _NULL
+    progress = progress or _NULL
+    mfa, notes = load_project(input_path, ctfak=ctfak, progress=progress)
+    sb3, report = build_project(mfa, progress)
     if notes:
         report.setdefault("notes", []).extend(notes)
     if output_path:
+        progress.step(f"writing {os.path.basename(output_path)}")
         with open(output_path, "wb") as fh:
             fh.write(sb3)
     if report_path:
         with open(report_path, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2)
+    progress.finish({"sprites": report.get("sprites", 0),
+                     "blocks": report.get("blocks", 0),
+                     "images": len(mfa.images),
+                     "sounds": len(mfa.sounds),
+                     "frames": len(mfa.frames),
+                     "warnings": len(report.get("warnings", []))})
     return {"project": sb3, "mfa": mfa, "report": report}
 
 
 def convert_bytes(data: bytes, input_name: str = "project.mfa",
-                  ctfak: Optional[str] = None) -> dict:
-    mfa, notes = load_from_bytes(data, input_name, ctfak)
-    sb3, report = build_project(mfa)
+                  ctfak: Optional[str] = None,
+                  progress=None) -> dict:
+    from .progress import NULL as _NULL
+    progress = progress or _NULL
+    mfa, notes = load_from_bytes(data, input_name, ctfak, progress)
+    sb3, report = build_project(mfa, progress)
     if notes:
         report.setdefault("notes", []).extend(notes)
+    progress.finish({"sprites": report.get("sprites", 0),
+                     "blocks": report.get("blocks", 0),
+                     "images": len(mfa.images),
+                     "sounds": len(mfa.sounds),
+                     "frames": len(mfa.frames),
+                     "warnings": len(report.get("warnings", []))})
     return {"project": sb3, "mfa": mfa, "report": report}

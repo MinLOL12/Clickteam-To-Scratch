@@ -160,7 +160,8 @@ class TestGameData(unittest.TestCase):
                 sprite_names = [t["name"] for t in pj["targets"]]
                 self.assertTrue(any(n == "Frame1-Player" for n in sprite_names))
                 pngs = [n for n in names if n.endswith(".png")]
-                self.assertEqual(len(pngs), 1)
+                # Backdrop + sprites are all real PNGs now (no SVG costumes).
+                self.assertGreaterEqual(len(pngs), 1)
             notes = result["report"].get("notes", [])
             self.assertTrue(any("no CTFAK needed" in n for n in notes))
             # The conversion should never have touched CTFAK.

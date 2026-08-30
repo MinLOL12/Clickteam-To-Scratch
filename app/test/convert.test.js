@@ -30,11 +30,15 @@ test('defaultOutputName swaps the extension for .sb3', () => {
 test('buildCliArgs assembles the cts2_cli.py invocation', () => {
   assert.deepEqual(
     buildCliArgs({ input: 'a.mfa', output: 'a.sb3', ctfak: null }),
-    ['cts2_cli.py', 'a.mfa', '-o', 'a.sb3']
+    ['cts2_cli.py', 'a.mfa', '-o', 'a.sb3', '--progress', 'json']
   );
   assert.deepEqual(
     buildCliArgs({ input: 'a.exe', output: 'a.sb3', ctfak: 'C:\\CTFAK\\CTFAK.Cli.exe' }),
-    ['cts2_cli.py', 'a.exe', '-o', 'a.sb3', '--ctfak', 'C:\\CTFAK\\CTFAK.Cli.exe']
+    ['cts2_cli.py', 'a.exe', '-o', 'a.sb3', '--ctfak', 'C:\\CTFAK\\CTFAK.Cli.exe', '--progress', 'json']
+  );
+  assert.deepEqual(
+    buildCliArgs({ input: 'a.mfa', output: 'a.sb3', progress: false }),
+    ['cts2_cli.py', 'a.mfa', '-o', 'a.sb3']
   );
 });
 

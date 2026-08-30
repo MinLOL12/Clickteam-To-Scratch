@@ -20,4 +20,9 @@ contextBridge.exposeInMainWorld('cts', {
     ipcRenderer.on('progress', listener);
     return () => ipcRenderer.removeListener('progress', listener);
   },
+  onConvertProgress: (cb) => {
+    const listener = (_e, ev) => cb(ev);
+    ipcRenderer.on('convert-progress', listener);
+    return () => ipcRenderer.removeListener('convert-progress', listener);
+  },
 });

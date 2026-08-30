@@ -199,40 +199,61 @@ def _event_notes_svg(mfa: MFA) -> Optional[bytes]:
     return svg.encode()
 
 
-def solid_svg(width: int, height: int, rgb: tuple) -> bytes:
-    w = max(width, 1)
-    h = max(height, 1)
-    r, g, b, *_ = rgb
-    return (
-        f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">'
-        f'<rect width="100%" height="100%" fill="rgb({r},{g},{b})"/></svg>'
-    ).encode()
+def solid_png(width: int, height: int, rgba: tuple) -> bytes:
+    """A flat-colour PNG (Scratch renders PNGs more reliably than SVGs)."""
+    from .png import encode_png
+    w = max(int(width), 1)
+    h = max(int(height), 1)
+    r, g, b = rgba[0], rgba[1], rgba[2]
+    a = rgba[3] if len(rgba) > 3 else 255
+    pixels = bytearray(w * h * 4)
+    for i in range(w * h):
+        j = i * 4
+        pixels[j] = r
+        pixels[j + 1] = g
+        pixels[j + 2] = b
+        pixels[j + 3] = a
+    return encode_png(w, h, bytes(pixels))
 
 
-def build_project(mfa: MFA) -> tuple:
+def _transparent_png() -> bytes:
+    """1x1 fully transparent PNG for helper sprites (e.g. the Events runner)."""
+    from .png import encode_png
+    return encode_png(1, 1, bytes([0, 0, 0, 0]))
+
+
+def build_project(mfa: MFA, progress=None) -> tuple:
     """Return (zip_bytes, report_dict)."""
-    assets: Dict[str, bytes] = {}
-    report = {"warnings": [], "assets": 0, "sprites": 0}
+    from .progress import NULL as _NULL
+    from .transpile import transpile_frame_blocks
 
+    progress = progress or _NULL
+    assets: Dict[str, bytes] = {}
+    report = {"warnings": [], "assets": 0, "sprites": 0,
+              "blocks": 0, "events_mapped": 0, "events_total": 0,
+              "approximations": 0, "unmapped_events": 0}
+
+    progress.phase("build", total=1 + len(mfa.frames))
+    progress.step("stage")
     stage = TargetBuilder("Stage", is_stage=True)
     if mfa.frames:
         f = mfa.frames[0]
-        svg = solid_svg(480, 360, f.background)
-        data = stage.add_costume_from_svg(svg, "backdrop1")
-        assets[data] = svg
+        png = solid_png(480, 360, f.background)
+        data = stage.add_costume(png, "backdrop1")
+        assets[data] = png
     elif mfa.images:
         first = next(iter(mfa.images.values()))
         if first.png:
             data = stage.add_costume(first.png, "backdrop1")
             assets[data] = first.png
     else:
-        svg = solid_svg(480, 360, (255, 255, 255, 255))
-        data = stage.add_costume_from_svg(svg, "backdrop1")
-        assets[data] = svg
+        png = solid_png(480, 360, (255, 255, 255, 255))
+        data = stage.add_costume(png, "backdrop1")
+        assets[data] = png
 
     sprites: List[TargetBuilder] = []
     for frame in mfa.frames:
-        _add_frame_sprites(mfa, frame, sprites, assets, report)
+        _add_frame_sprites(mfa, frame, sprites, assets, report, progress)
     # make sure assets referenced are present
     for target in [stage] + sprites:
         for c in target.costumes:
@@ -244,10 +265,46 @@ def build_project(mfa: MFA) -> tuple:
         # Always have at least one sprite so the project is openable.
         demo = TargetBuilder("GameLog")
         demo.add_variable(str(uuid.uuid4()), "converted")
-        svg = solid_svg(128, 128, (90, 120, 200))
-        data = demo.add_costume_from_svg(svg, "blank")
-        assets[data] = svg
+        png = solid_png(128, 128, (90, 120, 200))
+        data = demo.add_costume(png, "blank")
+        assets[data] = png
         sprites.append(demo)
+
+    # Compile the Clickteam event lists into real Scratch blocks.
+    progress.phase("transpile", total=sum(len(f.event_groups) for f in mfa.frames) or 1)
+    done_groups = 0
+    sprite_by_handle: Dict[int, TargetBuilder] = {}
+    events_sprites: List[TargetBuilder] = []
+    for frame in mfa.frames:
+        _collect_sprite_handles(frame, sprites, sprite_by_handle)
+        events_tb = TargetBuilder(f"{frame.name}-Events")
+        data = events_tb.add_costume(_transparent_png(), "runner")
+        assets[data] = _transparent_png()
+        events_sprites.append(events_tb)
+        ev_notes: List[str] = []
+        if frame.event_groups:
+            progress.step(
+                f"frame '{frame.name}': {len(frame.event_groups)} event groups")
+            stats = transpile_frame_blocks(
+                frame, mfa, events_tb, sprite_by_handle,
+                report["warnings"], ev_notes)
+            report["blocks"] += stats["blocks"]
+            report["events_mapped"] += stats["mapped"]
+            report["events_total"] += stats["groups"]
+            report["approximations"] += stats["approximations"]
+            report["unmapped_events"] += stats["unmapped"]
+            if stats["unmapped"]:
+                report["warnings"].append(
+                    f"frame '{frame.name}': {stats['unmapped']}/{stats['groups']} "
+                    f"event groups kept as Logic-Notes (opcodes not mapped to "
+                    f"Scratch blocks)")
+            if stats["mapped"]:
+                report["notes"] = report.get("notes", []) + [
+                    f"frame '{frame.name}': compiled {stats['mapped']} event "
+                    f"group(s) into {stats['blocks']} Scratch blocks"]
+        done_groups += len(frame.event_groups)
+        progress.tick(done_groups)
+    sprites.extend(events_sprites)
 
     notes = _event_notes_svg(mfa)
     if notes:
@@ -272,40 +329,73 @@ def build_project(mfa: MFA) -> tuple:
         },
     }
 
+    progress.phase("zip", total=1 + len(assets))
+    progress.tick(0, step="writing project.json")
     zf = zipfile.ZipFile
     out = __import__("io").BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("project.json", json.dumps(project, separators=(",", ":")))
+        zipped = 0
         for asset_id, data in assets.items():
             z.writestr(asset_id, data)
+            zipped += 1
+            progress.tick(zipped, step=f"packing asset {zipped}/{len(assets)}")
+    report["assets"] = len(assets)
+    report["sprites"] = len(sprites)
     return out.getvalue(), report
 
 
-def _placeholder_png(width: int, height: int, name: str) -> tuple:
-    """Return a visible placeholder (png, hotspot) for an undecodable image.
+def _placeholder_png(width: int, height: int, name: str) -> bytes:
+    """Return a visible labelled placeholder PNG for an undecodable image.
 
     The Clickteam image bank may hold images whose pixel format the decoder
     does not understand (compressed / exotic modes).  Rather than silently
     dropping the object (which is what made Scratch show the "?" placeholder
-    costume), we render a labelled magenta box so the object still appears at
-    the correct position and the miss is reported.
+    costume), we render a magenta-bordered box *as a real PNG* so the object
+    still appears at the correct position and the miss is reported.
     """
+    from .png import encode_png
     w = max(int(width or 32), 1)
     h = max(int(height or 32), 1)
-    svg = (
-        f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">'
-        f'<rect width="100%" height="100%" fill="#d80073"/>'
-        f'<rect x="1" y="1" width="{max(w - 2, 0)}" '
-        f'height="{max(h - 2, 0)}" fill="none" stroke="#7a0040"/>'
-        f'</svg>'
-    ).encode()
-    return svg, (0, 0)
+    pixels = bytearray(w * h * 4)
+    for y in range(h):
+        for x in range(w):
+            i = (y * w + x) * 4
+            edge = x < 2 or y < 2 or x >= w - 2 or y >= h - 2
+            if edge:
+                pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3] = 0x7A, 0x00, 0x40, 255
+            else:
+                pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3] = 0xD8, 0x00, 0x73, 255
+    return encode_png(w, h, bytes(pixels))
+
+
+def _collect_sprite_handles(frame: Frame, sprites: List[TargetBuilder],
+                            sprite_by_handle: Dict[int, TargetBuilder]) -> None:
+    """Map each frame item's handle to the sprite that represents it."""
+    seen: dict = {}
+    for inst in frame.instances:
+        item = _find_item(frame, inst.item_handle)
+        if item is None:
+            continue
+        if item.handle in seen:
+            sprite_by_handle[item.handle] = seen[item.handle]
+            continue
+        name = _sprite_name(frame, item)
+        for sb in sprites:
+            if sb.name == name:
+                seen[item.handle] = sb
+                sprite_by_handle[item.handle] = sb
+                break
 
 
 def _add_frame_sprites(mfa: MFA, frame: Frame, sprites: List[TargetBuilder],
-                       assets: Dict[str, bytes], report: dict) -> None:
+                       assets: Dict[str, bytes], report: dict, progress=None) -> None:
+    from .progress import NULL as _NULL
+    progress = progress or _NULL
     seen: dict = {}
-    for inst in frame.instances:
+    total = len(frame.instances) or 1
+    for n, inst in enumerate(frame.instances, start=1):
+        progress.tick(n, total, step=f"frame '{frame.name}': sprite {n}/{total}")
         item = _find_item(frame, inst.item_handle)
         if item is None:
             continue
@@ -315,14 +405,15 @@ def _add_frame_sprites(mfa: MFA, frame: Frame, sprites: List[TargetBuilder],
             hotspot = (visual.hotspot_x, visual.hotspot_y)
         else:
             # Image missing or its pixel data did not decode.  Emit a visible
-            # placeholder instead of a blank / "?" costume.
-            ph, hotspot = _placeholder_png(
+            # PNG placeholder instead of a blank / "?" costume.
+            ph = _placeholder_png(
                 visual.width if visual else item.width,
                 visual.height if visual else item.height,
                 item.name)
+            hotspot = (0, 0)
             report["warnings"].append(
                 f"Object {item.name}: image missing/undecodable; used a "
-                f"placeholder costume"
+                f"PNG placeholder costume"
             )
             png = None
         src_item = item.handle
@@ -342,7 +433,7 @@ def _add_frame_sprites(mfa: MFA, frame: Frame, sprites: List[TargetBuilder],
                             img.hotspot_y)
                         assets[a] = img.png
             else:
-                asset = sb.add_costume_from_svg(ph, "costume1", *hotspot)
+                asset = sb.add_costume(ph, "costume1", *hotspot)
                 assets[asset] = ph
             _add_sprite_scripts(sb, frame, inst, item, len(item.frames))
             seen[src_item] = sb
