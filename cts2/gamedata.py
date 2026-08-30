@@ -654,6 +654,13 @@ class _GameReader:
         self.warnings: List[str] = []
         self.decryptor: Optional[_Decryptor] = None
         self.missing_object_notes: List[str] = []
+        self.progress = None  # cts2.progress.Reporter (optional)
+
+    def warning(self, msg: str) -> None:
+        """Record a parser warning and stream it into the progress report."""
+        self.warnings.append(msg)
+        if self.progress is not None:
+            self.progress.warn(msg)
 
     # -- chunk interpreters -------------------------------------------------
 
@@ -710,7 +717,7 @@ class _GameReader:
         cap = 8
         self.warnings.extend(notes[:cap])
         if len(notes) > cap:
-            self.warnings.append(
+            self.warning(
                 f"... and {len(notes) - cap} more instance(s) reference "
                 "missing objects (frame items were not readable)"
             )
@@ -732,7 +739,7 @@ class _GameReader:
             r.i32()  # number of frames (also available from FrameHandles)
             self.frame_rate = r.i32()
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"app header unreadable: {exc}")
+            self.warning(f"app header unreadable: {exc}")
 
     def _read_app_name(self, data: bytes) -> None:
         r = Reader(data)
@@ -779,7 +786,7 @@ class _GameReader:
                         value = 0
                     self.global_values.append(ValueItem("", value, typ))
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"global values unreadable: {exc}")
+            self.warning(f"global values unreadable: {exc}")
 
     def _read_extensions(self, data: bytes) -> None:
         r = Reader(data)
@@ -868,7 +875,7 @@ class _GameReader:
         try:
             count = r.i32()
             if count < 0 or count > 65536:
-                self.warnings.append(
+                self.warning(
                     f"frame items chunk has implausible count {count}; "
                     "objects skipped"
                 )
@@ -877,14 +884,14 @@ class _GameReader:
                 info = _read_chunked_object_info(
                     self._read_object_block(r), self.two_five_plus, self.build)
                 if info.handle < 0:
-                    self.warnings.append(
+                    self.warning(
                         "a frame item could not be read (no object header "
                         "chunk found); it is skipped"
                     )
                     continue
                 self._finalize_object(info)
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"frame items unreadable: {exc}")
+            self.warning(f"frame items unreadable: {exc}")
 
     def _read_object_block(self, r: Reader) -> bytes:
         """Read one old-style chunked ObjectInfo from ``r``.
@@ -962,7 +969,7 @@ class _GameReader:
                         decoded, info.object_type, True, self.build)
                     pr.seek(current + chunk_size + 8)
             except Exception as exc:  # noqa: BLE001
-                self.warnings.append(f"2.5+ object properties: {exc}")
+                self.warning(f"2.5+ object properties: {exc}")
         for info in infos:
             self._finalize_object(info)
 
@@ -974,8 +981,12 @@ class _GameReader:
             count = r.i32()
             if count < 0 or count > 65536:
                 return
-            for _ in range(count):
+            if self.progress is not None:
+                self.progress.phase("images", total=count)
+            for i in range(count):
                 start = r.tell()
+                if self.progress is not None:
+                    self.progress.tick(i + 1, step=f"decoding image {i + 1}/{count} → PNG")
                 try:
                     if self.two_five_plus:
                         self._read_image_25(r)
@@ -991,11 +1002,11 @@ class _GameReader:
                             continue
                         except GameDataError:
                             pass
-                    self.warnings.append(f"image at {start} unreadable: {exc}")
+                    self.warning(f"image at {start} unreadable: {exc}")
                 if r.remaining() <= 0:
                     break
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"image bank unreadable: {exc}")
+            self.warning(f"image bank unreadable: {exc}")
 
     def _image_to_item(self, handle: int, checksum: int, references: int,
                        size: int, width: int, height: int, gmode: int,
@@ -1104,6 +1115,9 @@ class _GameReader:
             flags, hx, hy, ax, ay, transparent, png, raw)
 
     def _read_sound_bank(self, data: bytes) -> None:
+        if self.progress is not None:
+            self.progress.phase("sounds", total=1)
+            self.progress.step("extracting sound bank")
         r = Reader(data)
         try:
             count = r.i32()
@@ -1139,7 +1153,7 @@ class _GameReader:
                     handle, checksum, references, flags, name, audio,
                     decomp_size))
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"sound bank unreadable: {exc}")
+            self.warning(f"sound bank unreadable: {exc}")
 
     def _read_font_bank(self, data: bytes) -> None:
         r = Reader(data)
@@ -1161,7 +1175,7 @@ class _GameReader:
                     payload = b""
                 self.fonts.append(FontItem(handle, payload))
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"font bank unreadable: {exc}")
+            self.warning(f"font bank unreadable: {exc}")
 
     # -- frames -------------------------------------------------------------
 
@@ -1184,7 +1198,7 @@ class _GameReader:
                     ir = Reader(chunk.raw)
                     count = ir.i32()
                     if count < 0 or count > 65536:
-                        self.warnings.append(
+                        self.warning(
                             f"{frame.name or 'A frame'}: implausible "
                             f"instance count {count}; instances skipped"
                         )
@@ -1228,7 +1242,7 @@ class _GameReader:
                 # (13122), random seed (13124), layer effects (13125) are
                 # not needed for the SB3 export.
         except Exception as exc:  # noqa: BLE001
-            self.warnings.append(f"frame {frame.name} unreadable: {exc}")
+            self.warning(f"frame {frame.name} unreadable: {exc}")
         frame.items = list(self.objects.values())
         self.frames.append(frame)
 
@@ -1259,7 +1273,12 @@ class _GameReader:
 
         header_25 = names_25 = props_25 = None
         frame_chunks = []
-        for chunk in chunks:
+        if self.progress is not None:
+            self.progress.phase("chunks", total=len(chunks))
+            self.progress.step("decrypting game-data chunks")
+        for idx, chunk in enumerate(chunks, start=1):
+            if self.progress is not None:
+                self.progress.tick(idx, step=f"decrypting chunk {idx}/{len(chunks)}")
             if chunk.id == CHUNK_FRAME:
                 # Frames reference objects/banks, so interpret them after
                 # everything else has been assembled.
@@ -1318,16 +1337,22 @@ class _GameReader:
             self._read_frame_items_25(header_25, names_25, props_25)
 
         # Now that objects, globals and banks exist, interpret the frames.
-        for chunk in frame_chunks:
+        if self.progress is not None and frame_chunks:
+            self.progress.phase("frames", total=len(frame_chunks))
+        for idx, chunk in enumerate(frame_chunks, start=1):
             data = self._decoded(chunk, decryptor)
             if data is None:
                 continue
+            if self.progress is not None:
+                self.progress.step(f"parsing frame {idx}/{len(frame_chunks)}")
             handle = (
                 self.frame_handles[len(self.frames)]
                 if len(self.frames) < len(self.frame_handles)
                 else len(self.frames)
             )
             self._read_frame(data, handle)
+            if self.progress is not None:
+                self.progress.tick(idx)
 
         self._fold_missing_object_notes()
 
@@ -1428,7 +1453,7 @@ def find_game_data_offset(data: bytes) -> Optional[int]:
     return _scan_for_game_data(data, 0)
 
 
-def load_game_data_from_exe(source) -> Tuple[MFA, List[str]]:
+def load_game_data_from_exe(source, progress=None) -> Tuple[MFA, List[str]]:
     """Read an F2.5 EXE's PAME/PAMU game data and rebuild an MFA object.
 
     ``source`` may be a file path or the raw EXE bytes.  Returns
@@ -1437,6 +1462,9 @@ def load_game_data_from_exe(source) -> Tuple[MFA, List[str]]:
     encrypted-by-unknown-means games, etc.).
     """
     global _GLOBAL_UNICODE
+    from .progress import NULL as _NULL
+    if progress is None:
+        progress = _NULL
     if isinstance(source, (bytes, bytearray)):
         data = bytes(source)
     else:
@@ -1459,6 +1487,7 @@ def load_game_data_from_exe(source) -> Tuple[MFA, List[str]]:
     reader = _GameReader()
     reader.unicode = magic == b"PAMU"
     _GLOBAL_UNICODE = reader.unicode
+    reader.progress = progress
 
     runtime_version = r.u16()
     if runtime_version == CNCV1_VERSION:

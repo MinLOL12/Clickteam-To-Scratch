@@ -200,7 +200,11 @@ ipcMain.handle('convert', async (_e, { input, output }) => {
     return { ok: false, error: String((exc && exc.message) || exc) };
   }
 
-  const args = buildCliArgs({ input, output, ctfak: ctfak ? ctfak.path : null });
+  const reportPath = path.join(app.getPath('temp'),
+    `cts2-report-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const args = buildCliArgs({
+    input, output, ctfak: ctfak ? ctfak.path : null, report: reportPath,
+  });
   logLine(`[convert] ${path.basename(input)} -> ${path.basename(output)}`);
   if (exeLike) {
     if (ctfak) logLine(`[ctfak] optional fallback available at ${ctfak.path} (${ctfak.source})`);
@@ -211,6 +215,10 @@ ipcMain.handle('convert', async (_e, { input, output }) => {
     args,
     cwd: runtime.cwd || cts2Root(),
     onLog: logLine,
+    onProgress: (ev) => {
+      send('convert-progress', ev);
+      if (ev.type === 'warn' && ev.message) send('convert-warn', ev.message);
+    },
   });
   if (code !== 0) {
     return {
@@ -221,7 +229,19 @@ ipcMain.handle('convert', async (_e, { input, output }) => {
   if (!fs.existsSync(output)) {
     return { ok: false, error: 'conversion finished but the .sb3 file was not written' };
   }
-  return { ok: true, output, size: fs.statSync(output).size };
+  let report = {};
+  try {
+    report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  } catch {
+    /* report file is optional */
+  } finally {
+    try { fs.unlinkSync(reportPath); } catch { /* ignore */ }
+  }
+  return {
+    ok: true, output, size: fs.statSync(output).size,
+    warnings: report.warnings || [],
+    report,
+  };
 });
 
 // ---------------------------------------------------------------------------

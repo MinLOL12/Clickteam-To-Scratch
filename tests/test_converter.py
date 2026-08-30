@@ -70,7 +70,15 @@ class TestConverter(unittest.TestCase):
             pj = json.loads(z.read("project.json"))
             _validate_project(pj)
             self.assertTrue(any(t["name"] == "Logic-Notes" for t in pj["targets"]))
-        self.assertEqual(report["warnings"], [])
+            # Start-of-frame + Start loop (action 2001) must compile to blocks.
+            events = [t for t in pj["targets"] if t["name"] == "Frame 1-Events"]
+            self.assertEqual(len(events), 1)
+            self.assertGreater(len(events[0]["blocks"]), 0)
+            self.assertGreater(report["blocks"], 0)
+            self.assertEqual(report["events_mapped"], 1)
+        # Start loop has no readable count in the fixture: it warns and
+        # falls back to a default count instead of dropping the event.
+        self.assertTrue(any("Start loop" in w for w in report["warnings"]))
 
     def test_template_build_if_present(self):
         # The community template is optional (not checked into git).
@@ -125,7 +133,7 @@ class TestConverter(unittest.TestCase):
             player = [s for s in sprites if s["name"] == "Frame1-Player"]
             self.assertEqual(len(player), 1)
             self.assertEqual(len(player[0]["costumes"]), 1)
-            self.assertEqual(player[0]["costumes"][0]["dataFormat"], "svg")
+            self.assertEqual(player[0]["costumes"][0]["dataFormat"], "png")
             self.assertIn(player[0]["costumes"][0]["md5ext"], z.namelist())
             self.assertLess(player[0]["currentCostume"], len(player[0]["costumes"]))
 
