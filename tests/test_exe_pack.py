@@ -35,10 +35,9 @@ def _pe_header(section_count: int, section_names: list, raw_ptrs: list,
     pe += b"PE\x00\x00"
     # COFF file header: machine, nsections, timestamp, ptr_symtab,
     # num_symbols, opt_hdr_size, characteristics (20 bytes)
-    pe += struct.pack("<HHIIIHH", 0x14C, section_count, 0, 0, 0, 96, 0x102)
-    # optional header + 16 data directories, matching the reader's fixed
-    # skip (28+68 then 16*8)
-    pe += b"\x00" * (96 + 128)
+    pe += struct.pack("<HHIIIHH", 0x14C, section_count, 0, 0, 0, 224, 0x102)
+    # SizeOfOptionalHeader = 224 (PE32 + 16 data directories)
+    pe += b"\x00" * 224
     for name, raw_ptr, raw_size in zip(section_names, raw_ptrs, raw_sizes):
         pe += name.ljust(8, b"\x00")
         pe += struct.pack("<IIII", 0, 0, raw_size, raw_ptr)

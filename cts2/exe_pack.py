@@ -54,41 +54,55 @@ def _i32(buf: bytes, pos: int) -> int:
     return struct.unpack_from("<i", buf, pos)[0]
 
 
-def find_pack_start(data: bytes) -> int:
-    """Locate the start offset of the pack inside an F2.5 EXE.
+def pe_overlay_offset(data: bytes) -> int:
+    """Return the file offset where PE sections end (the overlay).
 
-    Mirrors CTFAK's ``CalculateEntryPoint``: find the ``.extra`` section's
-    raw pointer, or the end of the last section's raw data.
+    Clickteam appends PackData + PAME/PAMU game data after the last
+    section's raw bytes.  A dedicated ``.extra`` section, when present,
+    points straight at that overlay.
+
+    Uses the COFF ``SizeOfOptionalHeader`` field so PE32 *and* PE32+
+    (and any other optional-header size) are parsed correctly.  A
+    hardcoded 224-byte skip misses real Fusion runtimes whose optional
+    header is not exactly that length.
     """
     if len(data) < 64 or data[0:2] != b"MZ":
         raise PackError("not a PE executable (missing MZ header)")
     lfanew = _u32(data, 60)
-    if lfanew <= 0 or lfanew + 24 > len(data) or data[lfanew:lfanew + 2] != b"PE":
+    if lfanew <= 0 or lfanew + 24 > len(data) or data[lfanew:lfanew + 4] != b"PE\x00\x00":
         raise PackError("no PE header found")
     section_count = _u16(data, lfanew + 6)
     if section_count == 0:
         raise PackError("PE has no sections")
-    # Skip the fixed-size optional header (28 + 68) and 16 data
-    # directories (8 bytes each), exactly like the CTFAK reader does.
-    pos = lfanew + 4 + 20 + (28 + 68) + 16 * 8
-    position = None
-    for i in range(section_count):
-        entry = pos
-        name = data[entry:entry + 8].split(b"\x00", 1)[0].decode("latin-1")
+    opt_size = _u16(data, lfanew + 20)
+    pos = lfanew + 24 + opt_size
+    extra = None
+    overlay = 0
+    for _i in range(section_count):
+        if pos + 40 > len(data):
+            raise PackError("PE section table truncated")
+        name = data[pos:pos + 8].split(b"\x00", 1)[0].decode("latin-1", "replace")
+        raw_size = _u32(data, pos + 16)
+        raw_ptr = _u32(data, pos + 20)
+        end = raw_ptr + raw_size
+        if end > overlay:
+            overlay = end
         if name == ".extra":
-            position = _u32(data, entry + 20)  # pointer to raw data
-            break
-        if i >= section_count - 1:
-            raw_size = _u32(data, entry + 16)
-            raw_ptr = _u32(data, entry + 20)
-            position = raw_ptr + raw_size
-            break
+            extra = raw_ptr
         pos += 40
-    if position is None:  # pragma: no cover - defensive
-        raise PackError("could not determine pack offset from PE sections")
-    if position >= len(data):
+    position = extra if extra is not None else overlay
+    if position <= 0 or position >= len(data):
         raise PackError("pack offset points outside the file")
     return position
+
+
+def find_pack_start(data: bytes) -> int:
+    """Locate the start offset of the pack inside an F2.5 EXE.
+
+    Mirrors CTFAK's ``CalculateEntryPoint``: the ``.extra`` section's
+    raw pointer, or the overlay after the last section.
+    """
+    return pe_overlay_offset(data)
 
 
 def _decode_name(raw: bytes) -> str:

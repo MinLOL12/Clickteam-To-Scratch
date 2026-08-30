@@ -1259,6 +1259,65 @@ def _read_object_block(r: Reader) -> bytes:
 # entry points
 # --------------------------------------------------------------------------
 
+PACK_HEADER = 0x77777777
+PACK_MAGIC = 0x12478749
+
+
+def _looks_like_game_header(data: bytes, off: int) -> bool:
+    """True when ``off`` is a real PAME/PAMU game-data header, not a pack trailer."""
+    if off < 0 or off + 16 > len(data):
+        return False
+    if data[off : off + 4] not in GAME_HEADERS:
+        return False
+    runtime = struct.unpack_from("<H", data, off + 4)[0]
+    build = struct.unpack_from("<i", data, off + 12)[0]
+    # Fusion 2.0 / 2.5 sit around 0x300; MMF 1.5 CNC is 0x207 (rejected later
+    # with a specific error).  Pack trailers have zeros here.
+    if not (0x200 <= runtime <= 0x500):
+        return False
+    if build <= 0 or build > 9999:
+        return False
+    return True
+
+
+def _offset_after_pack(data: bytes, start: int) -> Optional[int]:
+    if start + 16 > len(data):
+        return None
+    header_word, magic_word = struct.unpack_from("<II", data, start)
+    if header_word != PACK_HEADER or magic_word != PACK_MAGIC:
+        return None
+    data_size = struct.unpack_from("<I", data, start + 12)[0]
+    game = start + data_size
+    if game + 4 <= len(data):
+        return game
+    return None
+
+
+def _scan_for_game_data(data: bytes, from_off: int = 0) -> Optional[int]:
+    """Search for a valid PAME/PAMU header, skipping pack payloads when found."""
+    start = max(from_off, 0)
+    # PackData magic as little-endian bytes (0x77777777, 0x12478749).
+    pack_sig = struct.pack("<II", PACK_HEADER, PACK_MAGIC)
+    pos = start
+    while True:
+        pame = data.find(b"PAME", pos)
+        pamu = data.find(b"PAMU", pos)
+        pack = data.find(pack_sig, pos)
+        candidates = [n for n in (pame, pamu, pack) if n >= 0]
+        if not candidates:
+            return None
+        first = min(candidates)
+        if first == pack:
+            after = _offset_after_pack(data, pack)
+            if after is not None and _looks_like_game_header(data, after):
+                return after
+            pos = pack + 1
+            continue
+        if _looks_like_game_header(data, first):
+            return first
+        pos = first + 1
+
+
 def find_game_data_offset(data: bytes) -> Optional[int]:
     """Return the offset where the PAME/PAMU game data starts, if any.
 
@@ -1268,27 +1327,28 @@ def find_game_data_offset(data: bytes) -> Optional[int]:
     * an EXE whose game data follows the PE sections directly,
     * an EXE with a Fusion "pack" first, game data after the pack.
 
-    Looks right after the PE executable (the ``.extra`` pointer / last
-    section end) in the latter two cases.
+    Real Clickteam EXEs (FNaF included) often have a PE optional header
+    whose size is not the 224-byte constant older readers assumed, or a
+    few bytes of padding before the pack.  After the PE overlay we also
+    *scan* for PackData / PAME/PAMU so those layouts still convert.
     """
-    if data[:4] in GAME_HEADERS:
+    if _looks_like_game_header(data, 0):
         return 0
+    start = None
     try:
-        start = exe_pack.find_pack_start(data)
+        start = exe_pack.pe_overlay_offset(data)
     except exe_pack.PackError:
-        return None
-    if start + 16 <= len(data):
-        header_word, magic_word = struct.unpack_from("<II", data, start)
-        # PackData header: 0x77777777, 0x12478749
-        if header_word == 0x77777777 and magic_word == 0x12478749:
-            data_size = struct.unpack_from("<I", data, start + 12)[0]
-            game = start + data_size
-            if game + 4 <= len(data):
-                return game
-            return None
-    if data[start : start + 4] in GAME_HEADERS:
-        return start
-    return None
+        start = None
+    if start is not None:
+        after_pack = _offset_after_pack(data, start)
+        if after_pack is not None and _looks_like_game_header(data, after_pack):
+            return after_pack
+        if _looks_like_game_header(data, start):
+            return start
+        found = _scan_for_game_data(data, start)
+        if found is not None:
+            return found
+    return _scan_for_game_data(data, 0)
 
 
 def load_game_data_from_exe(source) -> Tuple[MFA, List[str]]:
