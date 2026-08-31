@@ -161,6 +161,14 @@ Costume textures are always real **PNG** files (Scratch's `dataFormat:
 "png"`); images that fail to decode get a visible magenta PNG placeholder
 instead of a broken / "?" costume.
 
+All zlib payloads (sound/font/image banks, chunks, EXE pack entries) are
+decompressed **with a hard output cap** (256 MiB per sound, 128 MiB per
+image, 1 GiB per chunk). A tiny corrupt or hostile stream can otherwise
+expand to gigabytes, which used to freeze the progress display mid-step
+(`extracting sound 44/52`…) while the process was OOM-killed or swapped —
+no error, ever. Over-limit entries are now skipped instantly with a
+warning and the conversion continues with everything else.
+
 ## Tests
 
 ```bash

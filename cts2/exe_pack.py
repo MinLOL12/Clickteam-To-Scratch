@@ -24,6 +24,11 @@ import zlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
+from .compress import DecompressionLimitError, zlib_decompress_bounded
+
+# A pack entry past this decompressed size is a bomb, not a game file.
+_PACK_MAX_BYTES = 1024 * 1024 * 1024
+
 BINGO_MARKER = 0xD9F8  # i16 -9608: payload is a zlib stream
 
 
@@ -187,7 +192,11 @@ def read_pack(data: bytes, start: Optional[int] = None) -> Tuple[str, int, List[
                 raise PackError(f"compressed payload truncated for {name!r}")
             payload = data[pos + 2:pos + 2 + size]
             try:
-                data_out = zlib.decompress(payload)
+                data_out = zlib_decompress_bounded(payload, _PACK_MAX_BYTES)
+            except DecompressionLimitError as exc:
+                raise PackError(
+                    f"pack file {name!r} is a decompression bomb "
+                    f"({exc.produced} bytes and counting)") from exc
             except zlib.error as exc:
                 raise PackError(f"zlib failure in pack file {name!r}: {exc}") from exc
             pos += 2 + size
