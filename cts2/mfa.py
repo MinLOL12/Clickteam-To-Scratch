@@ -14,6 +14,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import audio
 from .bin import Reader
 from .compress import zlib_decompress_bounded
 from .ctimage import decode_bmp
@@ -428,7 +429,32 @@ def _read_font_bank(r: Reader) -> List[FontItem]:
     return out
 
 
+def _skip_sound_bank(r: Reader) -> List[SoundItem]:
+    """Advance past an MFA sound bank without materialising its payloads.
+
+    The sound bank sits before the image banks, so it still has to be walked
+    to keep the main reader aligned.  Only its fixed-size entry headers are
+    read; every audio payload is skipped in-place rather than copied, decoded,
+    or retained.
+    """
+    count = r.i32()
+    for _ in range(max(count, 0)):
+        if r.remaining() < 28:
+            raise EOFError("truncated sound-bank entry header")
+        r.skip(12)  # handle, checksum, references
+        payload_size = r.i32()
+        r.skip(12)  # flags, reserved, name length
+        if payload_size < 0 or payload_size > r.remaining():
+            raise ValueError(f"invalid sound payload size: {payload_size}")
+        r.skip(payload_size)
+    return []
+
+
 def _read_sound_bank(r: Reader) -> List[SoundItem]:
+    """Read sounds only when the temporary audio policy enables them."""
+    if not audio.EXTRACTION_ENABLED:
+        return _skip_sound_bank(r)
+
     count = r.i32()
     out = []
     for _ in range(max(count, 0)):
@@ -445,10 +471,10 @@ def _read_sound_bank(r: Reader) -> List[SoundItem]:
             name = nr.wide(max(name_len, 0))
         except Exception:
             name = ""
-        audio = nr.read(-1) if nr.remaining() > 0 else b""
-        if not audio:
-            audio = data
-        out.append(SoundItem(handle, checksum, references, flags, name.strip(), audio, decomp_size))
+        audio_data = nr.read(-1) if nr.remaining() > 0 else b""
+        if not audio_data:
+            audio_data = data
+        out.append(SoundItem(handle, checksum, references, flags, name.strip(), audio_data, decomp_size))
     return out
 
 

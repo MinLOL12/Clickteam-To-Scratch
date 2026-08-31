@@ -18,6 +18,7 @@ import os
 import tempfile
 from typing import List, Optional, Tuple
 
+from . import audio
 from . import ctfak as ctfak_mod
 from . import detect, exe_pack, gamedata
 from .mfa import MFA, load_mfa, load_mfa_bytes
@@ -30,6 +31,14 @@ _CTFAK_ONLY_EXTS = (".ccn", ".apk", ".dat", ".bin")
 _FOLDER_HINT_EXTS = tuple(
     dict.fromkeys(_EXE_LIKE + _CTFAK_ONLY_EXTS + (".app", ".pam", ".cca"))
 )
+
+
+def _note_audio_policy(report: dict, progress) -> None:
+    """Expose the temporary no-audio policy in every conversion result."""
+    if audio.EXTRACTION_ENABLED:
+        return
+    report.setdefault("notes", []).append(audio.DISABLED_NOTE)
+    progress.note(audio.DISABLED_NOTE)
 
 
 def find_ctfak_binary(hint: Optional[str] = None) -> Optional[str]:
@@ -256,6 +265,7 @@ def convert_file(input_path: str, output_path: Optional[str] = None,
     sb3, report = build_project(mfa, progress)
     if notes:
         report.setdefault("notes", []).extend(notes)
+    _note_audio_policy(report, progress)
     if output_path:
         progress.step(f"writing {os.path.basename(output_path)}")
         with open(output_path, "wb") as fh:
@@ -266,7 +276,6 @@ def convert_file(input_path: str, output_path: Optional[str] = None,
     progress.finish({"sprites": report.get("sprites", 0),
                      "blocks": report.get("blocks", 0),
                      "images": len(mfa.images),
-                     "sounds": len(mfa.sounds),
                      "frames": len(mfa.frames),
                      "warnings": len(report.get("warnings", []))})
     return {"project": sb3, "mfa": mfa, "report": report}
@@ -281,10 +290,10 @@ def convert_bytes(data: bytes, input_name: str = "project.mfa",
     sb3, report = build_project(mfa, progress)
     if notes:
         report.setdefault("notes", []).extend(notes)
+    _note_audio_policy(report, progress)
     progress.finish({"sprites": report.get("sprites", 0),
                      "blocks": report.get("blocks", 0),
                      "images": len(mfa.images),
-                     "sounds": len(mfa.sounds),
                      "frames": len(mfa.frames),
                      "warnings": len(report.get("warnings", []))})
     return {"project": sb3, "mfa": mfa, "report": report}

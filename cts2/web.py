@@ -68,7 +68,6 @@ def _start_job(data: bytes, name: str) -> str:
                 "sprites": res["report"].get("sprites", 0),
                 "blocks": res["report"].get("blocks", 0),
                 "images": len(res["mfa"].images),
-                "sounds": len(res["mfa"].sounds),
                 "frames": len(res["mfa"].frames),
                 "warnings": len(res["report"].get("warnings", [])),
             })
@@ -255,7 +254,7 @@ const $ = (id) => document.getElementById(id);
 const PHASES = [
   ['detect','Detect input'],['read','Read file'],['pack','EXE pack'],['gamedata','Game data'],
   ['chunks','Decrypt chunks'],['objects','Objects'],['frames','Frames'],['images','Images → PNG'],
-  ['sounds','Sounds'],['events','Events'],['transpile','Events → Blocks'],
+  ['events','Events'],['transpile','Events → Blocks'],
   ['build','Build project'],['zip','Pack .sb3'],
 ];
 const drop = $('drop'), fileInput = $('file');
@@ -334,7 +333,7 @@ function openStream(id){
   };
 }
 
-const COUNTERS = [['images','Images → PNG'],['sprites','Sprites'],['sounds','Sounds'],
+const COUNTERS = [['images','Images → PNG'],['sprites','Sprites'],
   ['events_mapped','Events → blocks'],['blocks','Blocks emitted'],['frames','Frames']];
 function render(ev){
   $('pctBig').textContent = Math.round(ev.overall || 0) + '%';
