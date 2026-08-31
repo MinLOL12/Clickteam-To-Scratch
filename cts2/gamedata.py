@@ -34,7 +34,7 @@ from __future__ import annotations
 import struct
 import zlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import exe_pack
 from .bin import Reader
@@ -207,16 +207,37 @@ def _init_decryption_table(magic_key: bytes) -> bytes:
     return bytes(buf)
 
 
-def _transform_chunk(data: bytearray, table: bytes) -> bytearray:
-    """Modified RC4 PRGA, applied in place."""
+def _transform_chunk(data: bytearray, table: bytes,
+                     on_progress: Optional[Callable[[int, int], None]] = None
+                     ) -> bytearray:
+    """Modified RC4 PRGA, applied in place.
+
+    ``on_progress(done_bytes, total_bytes)`` is invoked (at most every
+    1 MiB and at the end) so callers can report on long decryptions —
+    a single large encrypted chunk can take many seconds in pure Python,
+    and without it the progress display looks frozen.
+    """
     buf = bytearray(table)
     i = 0
     i2 = 0
-    for j in range(len(data)):
+    if on_progress is None:
+        for j in range(len(data)):
+            i = (i + 1) & 0xFF
+            i2 = (i2 + buf[i]) & 0xFF
+            buf[i2], buf[i] = buf[i], buf[i2]
+            data[j] ^= buf[(buf[i] + buf[i2]) & 0xFF]
+        return data
+    n = len(data)
+    last = -1 << 20  # report on the first step
+    for j in range(n):
         i = (i + 1) & 0xFF
         i2 = (i2 + buf[i]) & 0xFF
         buf[i2], buf[i] = buf[i], buf[i2]
         data[j] ^= buf[(buf[i] + buf[i2]) & 0xFF]
+        if j - last >= 1 << 20:
+            last = j
+            on_progress(j, n)
+    on_progress(n, n)
     return data
 
 
@@ -236,14 +257,18 @@ class _Decryptor:
         return _init_decryption_table(key)
 
     def decode(self, data: bytes, chunk_id: int, name: str, copyright_: str,
-               editor: str) -> bytes:
+               editor: str,
+               on_progress: Optional[Callable[[int, int], None]] = None
+               ) -> bytes:
         table = self._table_for(name, copyright_, editor)
         buf = bytearray(data)
-        _transform_chunk(buf, table)
+        _transform_chunk(buf, table, on_progress)
         return bytes(buf)
 
     def decode_mode3(self, data: bytes, chunk_id: int, name: str,
-                     copyright_: str, editor: str) -> bytes:
+                     copyright_: str, editor: str,
+                     on_progress: Optional[Callable[[int, int], None]] = None
+                     ) -> bytes:
         """Flag 3: [decompSize u32] + encrypted [compSize u32 + zlib]."""
         if len(data) < 4:
             raise ValueError("encrypted chunk too small")
@@ -251,7 +276,8 @@ class _Decryptor:
         raw = bytearray(data[4:])
         if (chunk_id & 1) == 1 and self.build > 284:
             raw[0] ^= (chunk_id & 0xFF) ^ (chunk_id >> 8)
-        _transform_chunk(raw, self._table_for(name, copyright_, editor))
+        _transform_chunk(raw, self._table_for(name, copyright_, editor),
+                         on_progress)
         if len(raw) < 4:
             raise ValueError("encrypted chunk too small")
         comp_size = struct.unpack_from("<I", raw, 0)[0]
@@ -261,7 +287,9 @@ class _Decryptor:
 
 
 def _decode_chunk(chunk: _Chunk, decryptor: _Decryptor, name: str,
-                  copyright_: str, editor: str, warnings: List[str]) -> Optional[bytes]:
+                  copyright_: str, editor: str, warnings: List[str],
+                  on_progress: Optional[Callable[[int, int], None]] = None
+                  ) -> Optional[bytes]:
     """Decrypt/decompress a chunk payload. Returns None when undecodable."""
     try:
         if chunk.flags == 0:
@@ -274,9 +302,11 @@ def _decode_chunk(chunk: _Chunk, decryptor: _Decryptor, name: str,
                 raise ValueError("bad compressed size")
             return zlib.decompress(chunk.raw[8 : 8 + comp_size])
         if chunk.flags == 2:
-            return decryptor.decode(chunk.raw, chunk.id, name, copyright_, editor)
+            return decryptor.decode(chunk.raw, chunk.id, name, copyright_,
+                                    editor, on_progress)
         if chunk.flags == 3:
-            return decryptor.decode_mode3(chunk.raw, chunk.id, name, copyright_, editor)
+            return decryptor.decode_mode3(chunk.raw, chunk.id, name,
+                                          copyright_, editor, on_progress)
         warnings.append(
             f"chunk {chunk.id} has unknown flags {chunk.flags}; reading raw"
         )
@@ -664,9 +694,12 @@ class _GameReader:
 
     # -- chunk interpreters -------------------------------------------------
 
-    def _decoded(self, chunk: _Chunk, decryptor: _Decryptor) -> Optional[bytes]:
+    def _decoded(self, chunk: _Chunk, decryptor: _Decryptor,
+                 on_progress: Optional[Callable[[int, int], None]] = None
+                 ) -> Optional[bytes]:
         return _decode_chunk(chunk, decryptor, self.name, self.copyright,
-                             self.editor_filename, self.warnings)
+                             self.editor_filename, self.warnings,
+                             on_progress=on_progress)
 
     def _decoded_chunks(self, r: Reader) -> List[_Chunk]:
         """Walk a *nested* chunk list, decoding every payload.
@@ -1123,7 +1156,13 @@ class _GameReader:
             count = r.i32()
             if count < 0 or count > 65536:
                 return
-            for _ in range(count):
+            if self.progress is not None and count > 1:
+                self.progress.tick(0, total=count,
+                                   step=f"extracting {count} sounds")
+            for i in range(count):
+                if self.progress is not None:
+                    self.progress.tick(i + 1,
+                                       step=f"extracting sound {i + 1}/{count}")
                 handle = r.u32() - 1
                 checksum = r.i32()
                 references = r.u32()
@@ -1263,6 +1302,18 @@ class _GameReader:
 
     # -- top level ----------------------------------------------------------
 
+    def _chunk_bytes_progress(self, idx: int, total_chunks: int):
+        """Step-text callback for slow in-place RC4 on a big encrypted chunk."""
+        prog = self.progress
+
+        def report(done: int, total: int) -> None:
+            prog.step(
+                f"decrypting chunk {idx}/{total_chunks} "
+                f"({done >> 20}/{total >> 20} MiB)"
+            )
+
+        return report
+
     def interpret(self, chunks: List[_Chunk]) -> None:
         decryptor = _Decryptor(self.build)
         self.decryptor = decryptor
@@ -1293,13 +1344,29 @@ class _GameReader:
             self.progress.step("decrypting game-data chunks")
         for idx, chunk in enumerate(chunks, start=1):
             if self.progress is not None:
+                # Image/sound bank readers switch the reporter to their own
+                # sub-phase while decoding; bring the chunk loop back to the
+                # "chunks" phase first, so the next tick counts chunks
+                # (without this, chunk 42 of 428 ticks against the sound
+                # bank's 1-sound total and shows 4200%).
+                if self.progress.phase_id != "chunks":
+                    self.progress.phase("chunks", total=len(chunks))
                 self.progress.tick(idx, step=f"decrypting chunk {idx}/{len(chunks)}")
             if chunk.id == CHUNK_FRAME:
                 # Frames reference objects/banks, so interpret them after
                 # everything else has been assembled.
                 frame_chunks.append(chunk)
                 continue
-            data = self._decoded(chunk, decryptor)
+            # Large RC4-encrypted chunks take a while in pure Python; report
+            # the byte count so the display keeps moving.
+            data = self._decoded(
+                chunk, decryptor,
+                on_progress=(
+                    self._chunk_bytes_progress(idx, len(chunks))
+                    if (self.progress is not None and chunk.flags in (2, 3)
+                        and len(chunk.raw) >= 1 << 20)
+                    else None
+                ))
             if data is None:
                 continue
             cid = chunk.id
