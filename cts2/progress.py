@@ -101,7 +101,11 @@ class Reporter:
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> dict:
+        # Clamp: a phase tick can momentarily run ahead of its total when a
+        # nested sub-phase (image/sound bank) swapped in a smaller total;
+        # the bar must never show e.g. 4200%.
         pct = (self.done / self.total * 100.0) if self.total > 0 else 0.0
+        pct = min(max(pct, 0.0), 100.0)
         overall = 0.0
         if self.phase_id:
             order = PHASE_ORDER
@@ -205,6 +209,9 @@ class Reporter:
 
 class _NullReporter:
     """No-op reporter used when the caller does not ask for progress."""
+
+    # Mirrors Reporter attributes callers may inspect (e.g. phase_id).
+    phase_id: Optional[str] = None
 
     def phase(self, *a, **k):
         pass

@@ -17,6 +17,7 @@ import zlib
 
 from cts2 import gamedata
 from cts2.converter import convert_file
+from cts2.progress import Reporter
 
 try:  # tests/ on sys.path when running `unittest discover -s tests`
     from exebuilder import (
@@ -518,6 +519,62 @@ class TestGameData(unittest.TestCase):
         # Even a garbage events blob is recorded; decoding yields 0 groups
         # without crashing the conversion.
         self.assertEqual(len(mfa.frames[0].event_groups), 0)
+
+
+class TestChunkProgress(unittest.TestCase):
+    """The image/sound bank readers switch to sub-phases mid chunk loop;
+    the chunk progress must not be corrupted by them (42/1 -> 4200%)."""
+
+    def _load_with_progress(self, exe: bytes):
+        events = []
+        rep = Reporter(sink=lambda ev: events.append(ev))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "game.exe")
+            with open(path, "wb") as fh:
+                fh.write(exe)
+            mfa = gamedata.load_game_data_from_exe(path, progress=rep)[0]
+        return mfa, events
+
+    def test_pct_never_exceeds_100_and_phase_recovers(self):
+        # Icon chunk (8757) after the sound bank: the chunk loop ticks at
+        # least once while the reporter is still in the "sounds" sub-phase.
+        exe = _standard_exe(extra_chunks=(chunk(8757, b"\x00" * 8),))
+        mfa, events = self._load_with_progress(exe)
+        self.assertEqual(len(mfa.sounds), 1)
+        for ev in events:
+            self.assertLessEqual(
+                ev.get("pct", 0), 100.0,
+                f"progress went over 100%: {ev!r}")
+        # Every "decrypting chunk i/N" tick must sit in the "chunks" phase
+        # with N as its total, and the last one must reach exactly 100%.
+        chunk_ticks = [ev for ev in events
+                       if ev.get("step", "").startswith("decrypting chunk")]
+        self.assertTrue(chunk_ticks)
+        for ev in chunk_ticks:
+            self.assertEqual(ev.get("phase"), "chunks")
+            self.assertEqual(ev.get("phase_title"), "Decrypting game chunks")
+        self.assertEqual(chunk_ticks[-1].get("pct"), 100.0)
+        # The sound bank sub-phase must have ticked per sound.
+        self.assertTrue(any(ev.get("step") == "extracting sound 1/1"
+                            for ev in events))
+
+    def test_transform_chunk_reports_progress(self):
+        table = gamedata._init_decryption_table(bytes(range(256)))
+        n = 4 << 20  # 4 MiB -> several 1 MiB progress steps
+        original = os.urandom(n)
+        data = bytearray(original)
+        calls = []
+        gamedata._transform_chunk(data, table,
+                                  on_progress=lambda d, t: calls.append((d, t)))
+        self.assertGreater(len(calls), 1)
+        for (d0, t0), (d1, t1) in zip(calls, calls[1:]):
+            self.assertLessEqual(d0, d1)
+            self.assertEqual(t0, t1)
+        self.assertEqual(calls[-1], (n, n))
+        # Round-trip still works with the callback attached.
+        back = bytearray(data)
+        gamedata._transform_chunk(back, table, on_progress=lambda d, t: None)
+        self.assertEqual(bytes(back), original)
 
 
 if __name__ == "__main__":

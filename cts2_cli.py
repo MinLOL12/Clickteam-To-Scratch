@@ -55,14 +55,17 @@ class _AnsiRenderer:
         elif etype == "note":
             self._clear()
             self.out.write(f"  ·  {ev.get('message', '')}\n")
-        pct = ev.get("pct", 0)
-        overall = ev.get("overall", 0)
+        pct = min(max(ev.get("pct", 0), 0), 100)
+        overall = min(max(ev.get("overall", 0), 0), 100)
         width = 28
-        filled = int(width * min(max(pct, 0), 100) / 100.0)
+        filled = int(width * pct / 100.0)
         spin = _SPINNER[int(time.monotonic() * 8) % len(_SPINNER)]
         bar = "█" * filled + "░" * (width - filled)
+        # \x1b[K clears anything left over from a previous, longer line
+        # (e.g. a "decoding image 42/42 → PNG" tail bleeding into the next
+        # "decrypting chunk …" step).
         line = (f"\r{spin} {bar} {pct:5.1f}%  [{ev.get('phase_title', '')}] "
-                f"{ev.get('step', '')[:70]}")
+                f"{ev.get('step', '')[:70]}\x1b[K")
         if ev.get("type") == "done":
             line += f"\n{spin} overall {overall:.0f}% · elapsed {ev.get('elapsed', 0):.1f}s"
         self.out.write(line)
