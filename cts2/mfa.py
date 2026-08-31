@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from .bin import Reader
+from .compress import zlib_decompress_bounded
 from .ctimage import decode_bmp
+
+# Cap for one decompressed MFA item (fonts, images): real items are far
+# smaller; anything past this is a corrupt/hostile stream.
+_MFA_MAX_BYTES = 128 * 1024 * 1024
 
 log = logging.getLogger("cts2.mfa")
 
@@ -414,7 +419,9 @@ def _read_font_bank(r: Reader) -> List[FontItem]:
         decomp_size = r.i32()
         comp_size = r.i32()
         if comp_size > 0 and comp_size < r.remaining():
-            data = zlib.decompress(r.read(comp_size), -15) if comp_size else b""
+            data = (zlib_decompress_bounded(r.read(comp_size),
+                                            _MFA_MAX_BYTES, wbits=-15)
+                    if comp_size else b"")
         else:
             data = r.read(max(decomp_size, 0))
         out.append(FontItem(handle, data))
@@ -504,7 +511,7 @@ def _lzx_decompress(data: bytes, expected: int) -> bytes:
     export files created by CTFAK 2.5+.
     """
     try:
-        out = zlib.decompress(data)
+        out = zlib_decompress_bounded(data, max(expected * 2, _MFA_MAX_BYTES))
         return out[:expected]
     except Exception:
         pass

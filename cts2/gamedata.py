@@ -38,7 +38,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from . import exe_pack
 from .bin import Reader
-from .compress import lz4_block_decompress
+from .compress import (
+    DecompressionLimitError,
+    lz4_block_decompress,
+    zlib_decompress_bounded,
+)
 from .ctimage import decode_bmp
 from .png import encode_png
 from .mfa import (
@@ -55,6 +59,32 @@ from .mfa import (
     SoundItem,
     ValueItem,
 )
+
+# --------------------------------------------------------------------------
+# size guards
+# --------------------------------------------------------------------------
+# Per-item decompression caps.  A zlib stream can expand ~1032x, so a tiny
+# corrupt or hostile entry can demand gigabytes; one-shot decompression then
+# gets the process OOM-killed (or swapping for many minutes) with the progress
+# display frozen on the last step and no error anywhere.  Anything past these
+# limits is skipped with a warning instead — no real game asset comes close.
+_SOUND_MAX_BYTES = 256 * 1024 * 1024   # ~10 min of 44.1 kHz stereo PCM
+_IMAGE_MAX_BYTES = 128 * 1024 * 1024   # 4096x4096 RGBA with room to spare
+_CHUNK_MAX_BYTES = 1024 * 1024 * 1024  # whole banks legitimately get large
+
+
+class _SoundSkip(Exception):
+    """A sound-bank entry that must be skipped (message says why).
+
+    ``hard`` means the reader can no longer trust its position in the bank
+    (implausible sizes), so the whole bank read must stop — keeping every
+    sound extracted so far.
+    """
+
+    def __init__(self, message: str, hard: bool = False):
+        super().__init__(message)
+        self.hard = hard
+
 
 # --------------------------------------------------------------------------
 # chunk ids
@@ -283,7 +313,8 @@ class _Decryptor:
         comp_size = struct.unpack_from("<I", raw, 0)[0]
         if comp_size < 0 or comp_size > len(raw) - 4:
             raise ValueError("bad compressed size in encrypted chunk")
-        return zlib.decompress(bytes(raw[4 : 4 + comp_size]))
+        return zlib_decompress_bounded(bytes(raw[4 : 4 + comp_size]),
+                                        _CHUNK_MAX_BYTES)
 
 
 def _decode_chunk(chunk: _Chunk, decryptor: _Decryptor, name: str,
@@ -300,7 +331,8 @@ def _decode_chunk(chunk: _Chunk, decryptor: _Decryptor, name: str,
             comp_size = struct.unpack_from("<I", chunk.raw, 4)[0]
             if comp_size < 0 or comp_size > len(chunk.raw) - 8:
                 raise ValueError("bad compressed size")
-            return zlib.decompress(chunk.raw[8 : 8 + comp_size])
+            return zlib_decompress_bounded(chunk.raw[8 : 8 + comp_size],
+                                            _CHUNK_MAX_BYTES)
         if chunk.flags == 2:
             return decryptor.decode(chunk.raw, chunk.id, name, copyright_,
                                     editor, on_progress)
@@ -995,8 +1027,9 @@ class _GameReader:
                     payload = pr.read(chunk_size)
                     pr.skip(4)  # trailing marker per record
                     try:
-                        decoded = zlib.decompress(payload)
-                    except zlib.error:
+                        decoded = zlib_decompress_bounded(
+                            payload, _CHUNK_MAX_BYTES)
+                    except (zlib.error, DecompressionLimitError):
                         decoded = payload
                     info.props = _read_object_props(
                         decoded, info.object_type, True, self.build)
@@ -1074,8 +1107,9 @@ class _GameReader:
         if comp_size < 0 or comp_size > r.remaining():
             raise GameDataError("bad image payload size")
         try:
-            inner = zlib.decompress(r.read(comp_size))
-        except zlib.error as exc:
+            inner = zlib_decompress_bounded(r.read(comp_size),
+                                            _IMAGE_MAX_BYTES)
+        except (zlib.error, DecompressionLimitError) as exc:
             raise GameDataError(f"image {handle} payload: {exc}") from exc
         ir = Reader(inner)
         try:
@@ -1099,8 +1133,9 @@ class _GameReader:
         if flags & 0x08:  # LZX: one zlib stream for the rest of the item
             ir.i32()  # decompressed size
             try:
-                body = zlib.decompress(ir.read(-1))
-            except zlib.error:
+                body = zlib_decompress_bounded(ir.read(-1),
+                                               _IMAGE_MAX_BYTES)
+            except (zlib.error, DecompressionLimitError):
                 body = b""
         else:
             body = ir.read(max(size, 0))
@@ -1163,36 +1198,70 @@ class _GameReader:
                 if self.progress is not None:
                     self.progress.tick(i + 1,
                                        step=f"extracting sound {i + 1}/{count}")
-                handle = r.u32() - 1
-                checksum = r.i32()
-                references = r.u32()
-                decomp_size = r.i32()
-                flags = r.u8()
-                r.skip(3)
-                r.i32()  # reserved
-                name_len = r.i32()
-                if flags != 33:
-                    comp_size = r.i32()
-                    if comp_size < 0 or comp_size > r.remaining():
+                try:
+                    self._read_one_sound(r, i, count)
+                except _SoundSkip as skip:
+                    # The entry's bytes were consumed (or never trustworthy);
+                    # keep the sounds we already have and carry on.
+                    self.warning(str(skip))
+                    if skip.hard:
                         break
-                    try:
-                        payload = zlib.decompress(r.read(comp_size))
-                    except zlib.error:
-                        payload = b""
-                else:
-                    payload = r.read(max(decomp_size, 0))
-                name = ""
-                if len(payload) >= max(name_len, 0) * 2:
-                    name = payload[: name_len * 2].decode(
-                        "utf-16-le", "replace").strip("\x00")
-                audio = payload[name_len * 2:] if flags != 33 else payload
-                if not audio:
-                    audio = payload
-                self.sounds.append(SoundItem(
-                    handle, checksum, references, flags, name, audio,
-                    decomp_size))
+                except (EOFError, ValueError, zlib.error) as exc:
+                    self.warning(
+                        f"sound {i + 1}/{count} unreadable: {exc}; kept the "
+                        f"{len(self.sounds)} sounds read so far"
+                    )
+                    break
         except Exception as exc:  # noqa: BLE001
             self.warning(f"sound bank unreadable: {exc}")
+
+    def _read_one_sound(self, r: Reader, index: int, count: int) -> None:
+        """Parse one sound-bank entry, appending to :attr:`sounds`.
+
+        Raises :class:`_SoundSkip` for entries that must not become sounds
+        (decompression bombs, over-limit sizes) after consuming their bytes,
+        so the bank loop can warn and continue with the remaining entries.
+        """
+        handle = r.u32() - 1
+        checksum = r.i32()
+        references = r.u32()
+        decomp_size = r.i32()
+        flags = r.u8()
+        r.skip(3)
+        r.i32()  # reserved
+        name_len = r.i32()
+        if flags != 33:
+            comp_size = r.i32()
+            if comp_size < 0 or comp_size > r.remaining():
+                raise _SoundSkip(
+                    f"sound {index + 1}/{count}: bad compressed size "
+                    f"{comp_size}; kept the {len(self.sounds)} sounds read "
+                    f"so far", hard=True)
+            comp = r.read(comp_size)
+            if decomp_size > _SOUND_MAX_BYTES:
+                raise _SoundSkip(
+                    f"sound {index + 1}/{count} skipped: declares "
+                    f"{decomp_size} bytes, over the "
+                    f"{_SOUND_MAX_BYTES >> 20} MiB per-sound limit")
+            try:
+                payload = zlib_decompress_bounded(comp, _SOUND_MAX_BYTES)
+            except DecompressionLimitError as exc:
+                raise _SoundSkip(
+                    f"sound {index + 1}/{count} skipped: {exc}") from exc
+            except zlib.error:
+                payload = b""
+        else:
+            payload = r.read(max(decomp_size, 0))
+        name = ""
+        if len(payload) >= max(name_len, 0) * 2:
+            name = payload[: name_len * 2].decode(
+                "utf-16-le", "replace").strip("\x00")
+        audio = payload[name_len * 2:] if flags != 33 else payload
+        if not audio:
+            audio = payload
+        self.sounds.append(SoundItem(
+            handle, checksum, references, flags, name, audio,
+            decomp_size))
 
     def _read_font_bank(self, data: bytes) -> None:
         r = Reader(data)
@@ -1209,8 +1278,9 @@ class _GameReader:
                 if comp_size < 0 or comp_size > r.remaining():
                     break
                 try:
-                    payload = zlib.decompress(r.read(comp_size))
-                except zlib.error:
+                    payload = zlib_decompress_bounded(r.read(comp_size),
+                                                      _CHUNK_MAX_BYTES)
+                except (zlib.error, DecompressionLimitError):
                     payload = b""
                 self.fonts.append(FontItem(handle, payload))
         except Exception as exc:  # noqa: BLE001

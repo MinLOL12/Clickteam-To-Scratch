@@ -1,6 +1,63 @@
 """Compression helpers used by the Clickteam readers (pure stdlib)."""
 from __future__ import annotations
 
+import zlib
+from typing import Optional
+
+# Default slice size fed to the decompressor per call. Small slices keep the
+# transient allocation of a highly compressed (bomb) slice bounded: zlib can
+# expand data up to ~1032x, so a 64 KiB slice can never produce more than
+# ~66 MiB of output in one call.
+_SLICE = 64 * 1024
+
+
+class DecompressionLimitError(Exception):
+    """A zlib stream expanded past the allowed output size (zip bomb?)."""
+
+    def __init__(self, produced: int, max_out: int):
+        self.produced = produced
+        self.max_out = max_out
+        super().__init__(
+            f"decompresses beyond the {max_out} byte limit "
+            f"({produced} bytes and counting — likely a corrupt or "
+            f"hostile stream)"
+        )
+
+
+def zlib_decompress_bounded(data: bytes, max_out: int,
+                            wbits: Optional[int] = None) -> bytes:
+    """``zlib.decompress`` with a hard cap on the decompressed size.
+
+    A few kilobytes of compressed data can expand to gigabytes (a classic
+    decompression bomb).  One-shot ``zlib.decompress`` allocates the whole
+    expansion up front, which either gets the process OOM-killed or leaves
+    it swapping for many minutes while the progress display freezes on the
+    last step — no error, nothing.  Feeding the stream to a decompress
+    object in small slices lets us abort the moment the output passes
+    ``max_out``.
+
+    Raises :class:`DecompressionLimitError` past the limit and
+    ``zlib.error`` on a truncated stream, exactly like the one-shot call.
+    Trailing data after the end of the stream is ignored (also like the
+    one-shot call).
+    """
+    d = zlib.decompressobj(wbits) if wbits is not None else zlib.decompressobj()
+    out = bytearray()
+    n = len(data)
+    pos = 0
+    while pos < n:
+        piece = d.decompress(data[pos : pos + _SLICE])
+        out += piece
+        pos += _SLICE
+        if len(out) > max_out:
+            raise DecompressionLimitError(len(out), max_out)
+    if not d.eof:
+        # Match one-shot zlib.decompress: an incomplete stream is an error,
+        # not silently truncated output.
+        raise zlib.error(
+            -5, "incomplete or truncated stream")
+    return bytes(out)
+
 
 def lz4_block_decompress(data: bytes, expected: int) -> bytes:
     """Decompress a raw LZ4 *block* (no frame header) into ``expected`` bytes.
