@@ -3,12 +3,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import struct
 import tempfile
 import unittest
 import zipfile
 
+from cts2.bin import Reader
 from cts2.converter import convert_file
-from cts2.mfa import Frame, FrameInstance, load_mfa
+from cts2.mfa import Frame, FrameInstance, _read_sound_bank, load_mfa
 from cts2.png import encode_png
 from cts2.scratch import _add_sprite_scripts, TargetBuilder, build_project
 from tests.exebuilder import (build_exe, build_game_data, frame_chunk,
@@ -62,6 +64,23 @@ class TestConverter(unittest.TestCase):
         self.assertEqual(len(groups[0].conditions), 1)
         self.assertEqual(len(groups[0].actions), 1)
         self.assertEqual(groups[0].conditions[0].num, -1)
+
+    def test_mfa_sound_payload_is_skipped_without_reading(self):
+        # MFA sound entries are inline, so the parser must advance over the
+        # payload to reach the image bank. A guarded reader verifies it uses
+        # skip() rather than creating a copy of the 4 KiB audio payload.
+        payload = b"audio" * 819
+        entry = struct.pack("<IiIiIii", 1, 0, 0, len(payload), 0, 0, 0)
+
+        class PayloadGuardReader(Reader):
+            def read(self, size):
+                if size == len(payload):
+                    raise AssertionError("audio payload was read")
+                return super().read(size)
+
+        reader = PayloadGuardReader(struct.pack("<i", 1) + entry + payload)
+        self.assertEqual(_read_sound_bank(reader), [])
+        self.assertEqual(reader.remaining(), 0)
 
     def test_build_valid_sb3(self):
         mfa = load_mfa(os.path.join(FIXTURES, "events.mfa"))

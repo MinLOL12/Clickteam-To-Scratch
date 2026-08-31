@@ -36,11 +36,10 @@ _PHASE_WEIGHTS: Dict[str, float] = {
     "detect": 0.03,
     "pack": 0.05,
     "gamedata": 0.12,
-    "chunks": 0.10,
+    "chunks": 0.14,
     "objects": 0.10,
     "frames": 0.08,
     "images": 0.18,
-    "sounds": 0.04,
     "events": 0.08,
     "build": 0.06,
     "transpile": 0.08,
@@ -60,7 +59,6 @@ def _default_phase_title(phase: str) -> str:
         "objects": "Parsing objects",
         "frames": "Parsing frames",
         "images": "Decoding images to PNG",
-        "sounds": "Extracting sounds",
         "events": "Parsing event lists",
         "transpile": "Compiling events to Scratch blocks",
         "build": "Building Scratch project",
@@ -101,9 +99,9 @@ class Reporter:
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> dict:
-        # Clamp: a phase tick can momentarily run ahead of its total when a
-        # nested sub-phase (image/sound bank) swapped in a smaller total;
-        # the bar must never show e.g. 4200%.
+        # Clamp: a phase tick can momentarily run ahead of its total when an
+        # image-bank sub-phase swaps in a smaller total; the bar must never
+        # show e.g. 4200%.
         pct = (self.done / self.total * 100.0) if self.total > 0 else 0.0
         pct = min(max(pct, 0.0), 100.0)
         overall = 0.0

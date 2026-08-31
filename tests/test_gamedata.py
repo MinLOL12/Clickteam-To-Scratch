@@ -12,6 +12,7 @@ import os
 import struct
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 import zlib
 
@@ -136,10 +137,9 @@ class TestGameData(unittest.TestCase):
         self.assertEqual((img.width, img.height), (2, 2))
         self.assertIsNotNone(img.png)
         self.assertTrue(img.png.startswith(b"\x89PNG"))
-        # sound decoded
-        self.assertEqual(len(mfa.sounds), 1)
-        self.assertEqual(mfa.sounds[0].name, "Beep")
-        self.assertEqual(mfa.sounds[0].data, b"\x12\x34\x56\x78")
+        # Audio extraction is intentionally disabled: the sound bank is not
+        # decoded or retained, but the rest of the game still parses.
+        self.assertEqual(mfa.sounds, [])
         # globals
         self.assertEqual([v.value for v in mfa.global_values], [0, 3])
         self.assertEqual([v.value for v in mfa.global_strings], ["Hello"])
@@ -154,6 +154,8 @@ class TestGameData(unittest.TestCase):
             out = os.path.join(tmp, "game.sb3")
             result = convert_file(exe_path, out)
             self.assertTrue(os.path.exists(out))
+            self.assertTrue(any("Audio extraction is currently disabled" in n
+                                for n in result["report"].get("notes", [])))
             with zipfile.ZipFile(io.BytesIO(result["project"])) as z:
                 names = z.namelist()
                 self.assertIn("project.json", names)
@@ -522,8 +524,7 @@ class TestGameData(unittest.TestCase):
 
 
 class TestChunkProgress(unittest.TestCase):
-    """The image/sound bank readers switch to sub-phases mid chunk loop;
-    the chunk progress must not be corrupted by them (42/1 -> 4200%)."""
+    """Image-bank sub-phases must not corrupt subsequent chunk progress."""
 
     def _load_with_progress(self, exe: bytes):
         events = []
@@ -536,11 +537,11 @@ class TestChunkProgress(unittest.TestCase):
         return mfa, events
 
     def test_pct_never_exceeds_100_and_phase_recovers(self):
-        # Icon chunk (8757) after the sound bank: the chunk loop ticks at
-        # least once while the reporter is still in the "sounds" sub-phase.
+        # An icon chunk after the skipped sound bank verifies that chunk
+        # progress continues normally once image/bank work is complete.
         exe = _standard_exe(extra_chunks=(chunk(8757, b"\x00" * 8),))
         mfa, events = self._load_with_progress(exe)
-        self.assertEqual(len(mfa.sounds), 1)
+        self.assertEqual(mfa.sounds, [])
         for ev in events:
             self.assertLessEqual(
                 ev.get("pct", 0), 100.0,
@@ -554,9 +555,11 @@ class TestChunkProgress(unittest.TestCase):
             self.assertEqual(ev.get("phase"), "chunks")
             self.assertEqual(ev.get("phase_title"), "Decrypting game chunks")
         self.assertEqual(chunk_ticks[-1].get("pct"), 100.0)
-        # The sound bank sub-phase must have ticked per sound.
-        self.assertTrue(any(ev.get("step") == "extracting sound 1/1"
-                            for ev in events))
+        # Audio extraction is disabled, so it must never become a progress
+        # phase or emit per-sound extraction work.
+        self.assertFalse(any(ev.get("phase") == "sounds" for ev in events))
+        self.assertFalse(any("extracting sound" in ev.get("step", "")
+                             for ev in events))
 
     def test_transform_chunk_reports_progress(self):
         table = gamedata._init_decryption_table(bytes(range(256)))
@@ -577,55 +580,8 @@ class TestChunkProgress(unittest.TestCase):
         self.assertEqual(bytes(back), original)
 
 
-class TestSoundBankBombs(unittest.TestCase):
-    """A decompression-bomb sound must be skipped with a warning instead of
-    freezing (or OOM-killing) the whole conversion at `extracting sound
-    N/M` — the reader's per-sound zlib.decompress used to expand one tiny
-    corrupt/hostile stream into gigabytes with no output and no error."""
-
-    def _sound_entry(self, handle, name, comp, decomp_size):
-        data = bytearray()
-        data += struct.pack("<I", handle + 1)
-        data += struct.pack("<i", 0)              # checksum
-        data += struct.pack("<I", 1)              # references
-        data += struct.pack("<i", decomp_size)    # decompressed size
-        data += b"\x00" + b"\x00\x00\x00"         # flags + padding
-        data += struct.pack("<i", 0)              # reserved
-        data += struct.pack("<i", len(name))      # name length
-        data += struct.pack("<i", len(comp))      # compressed size
-        data += comp
-        return bytes(data)
-
-    def _mk_sound(self, handle, name, audio):
-        payload = name.encode("utf-16-le") + b"\x00\x00" + audio
-        return self._sound_entry(handle, name, zlib.compress(payload),
-                                 len(payload))
-
-    def _bomb_stream(self, target_bytes):
-        co = zlib.compressobj(9)
-        parts = []
-        sent = 0
-        while sent < target_bytes:
-            parts.append(co.compress(b"\x00" * (1 << 20)))
-            sent += 1 << 20
-        parts.append(co.flush())
-        return b"".join(parts)
-
-    def _exe_with_bank(self, entries):
-        bank = chunk(26216, struct.pack("<i", len(entries)) + b"".join(entries))
-        pixels = _png_pixels_2x2()
-        images = [image_item_normal(0, 2, 2, pixels, build=294)]
-        game = build_game_data(
-            name="My Game", unicode=True, build=294, images=images,
-            objects_25=[object_common_25(frames_per_anim=((0,),))],
-            object_names=("Player",),
-            frames=[frame_chunk(name="Frame 1",
-                                instances=(frame_instance(),),
-                                layers=(("Layer 1", 1.0, 1.0),))],
-            frame_handles=(0,),
-            extra_chunks=(bank,),
-        )
-        return build_exe(game, pack_files=[])
+class TestAudioExtractionDisabled(unittest.TestCase):
+    """Sound chunks are ignored before their payloads are decoded."""
 
     def _load(self, exe):
         with tempfile.TemporaryDirectory() as tmp:
@@ -634,50 +590,31 @@ class TestSoundBankBombs(unittest.TestCase):
                 fh.write(exe)
             return gamedata.load_game_data_from_exe(path)
 
-    def test_bomb_sound_is_skipped_and_conversion_completes(self):
-        # Sound 44/52 declares an honest huge size: skipped before even
-        # decompressing, every other sound still extracted.
-        sounds = [self._mk_sound(i, "snd%d" % i, b"\x99" * 64) for i in range(52)]
-        bomb = self._bomb_stream(8 << 20)  # ~8 MiB expansion
-        sounds[43] = self._sound_entry(43, "snd43", bomb, 1 << 30)
-        mfa, notes = self._load(self._exe_with_bank(sounds))
+    def test_sound_chunk_is_never_decoded(self):
+        # This bank contains a nested compressed audio payload.  Guard the
+        # general chunk decoder so the test fails if the audio chunk reaches
+        # decryption/decompression at all.
+        original_decode = gamedata._decode_chunk
+
+        def decode_non_audio(chunk_obj, *args, **kwargs):
+            self.assertNotEqual(chunk_obj.id, gamedata.CHUNK_SOUND_BANK)
+            return original_decode(chunk_obj, *args, **kwargs)
+
+        with unittest.mock.patch.object(gamedata, "_decode_chunk",
+                                        side_effect=decode_non_audio):
+            mfa, _notes = self._load(_standard_exe())
+
+        self.assertEqual(mfa.sounds, [])
+
+    def test_malformed_compressed_sound_chunk_is_ignored(self):
+        # Invalid compressed bytes would previously be decoded and warned
+        # about. With audio off, the chunk's contents are irrelevant.
+        malformed = chunk(gamedata.CHUNK_SOUND_BANK, b"not a zlib stream",
+                          gamedata.FLAG_COMPRESSED)
+        mfa, notes = self._load(_standard_exe(extra_chunks=(malformed,)))
         self.assertEqual(len(mfa.frames), 1)
-        self.assertEqual(len(mfa.sounds), 51)
-        skips = [n for n in notes if "sound 44/52" in n and "skipped" in n]
-        self.assertTrue(skips, notes)
-        self.assertIn("limit", skips[0])
-
-    def test_bomb_sound_with_lying_size_still_hits_the_limiter(self):
-        # The header claims 30 KB but the stream expands for megabytes:
-        # the mid-decompression limiter must abort it, not the process.
-        sounds = [self._mk_sound(i, "snd%d" % i, b"\x99" * 64) for i in range(52)]
-        bomb = self._bomb_stream(512 << 20)  # 512 MiB expansion, small input
-        sounds[43] = self._sound_entry(43, "snd43", bomb, 30000)
-        mfa, notes = self._load(self._exe_with_bank(sounds))
-        self.assertEqual(len(mfa.sounds), 51)
-        self.assertTrue(
-            any("sound 44/52" in n and "skipped" in n for n in notes), notes)
-
-    def test_truncated_bank_keeps_sounds_read_so_far(self):
-        # comp_size beyond the payload: the reader must stop the bank but
-        # keep the sounds it already extracted, with a warning.
-        sounds = [self._mk_sound(i, "snd%d" % i, b"\x99" * 64) for i in range(10)]
-        handle = 10 + 1
-        data = bytearray()
-        data += struct.pack("<I", handle)
-        data += struct.pack("<i", 0)
-        data += struct.pack("<I", 1)
-        data += struct.pack("<i", 64)
-        data += b"\x00" + b"\x00\x00\x00"
-        data += struct.pack("<i", 0)
-        data += struct.pack("<i", 4)
-        data += struct.pack("<i", 1 << 30)  # comp_size >> remaining
-        sounds.append(bytes(data))
-        mfa, notes = self._load(self._exe_with_bank(sounds))
-        self.assertEqual(len(mfa.sounds), 10)
-        self.assertTrue(
-            any("sound 11/11" in n and "kept the 10 sounds" in n
-                for n in notes), notes)
+        self.assertEqual(mfa.sounds, [])
+        self.assertFalse(any("sound bank unreadable" in note for note in notes))
 
 
 if __name__ == "__main__":

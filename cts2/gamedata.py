@@ -36,7 +36,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import exe_pack
+from . import audio, exe_pack
 from .bin import Reader
 from .compress import (
     DecompressionLimitError,
@@ -65,9 +65,9 @@ from .mfa import (
 # --------------------------------------------------------------------------
 # Per-item decompression caps.  A zlib stream can expand ~1032x, so a tiny
 # corrupt or hostile entry can demand gigabytes; one-shot decompression then
-# gets the process OOM-killed (or swapping for many minutes) with the progress
-# display frozen on the last step and no error anywhere.  Anything past these
-# limits is skipped with a warning instead — no real game asset comes close.
+# gets the process OOM-killed (or swapping for many minutes).  Anything past
+# these limits is skipped with a warning instead — no real game asset comes
+# close. Sound-bank payloads are not decoded while audio extraction is off.
 _SOUND_MAX_BYTES = 256 * 1024 * 1024   # ~10 min of 44.1 kHz stereo PCM
 _IMAGE_MAX_BYTES = 128 * 1024 * 1024   # 4096x4096 RGBA with room to spare
 _CHUNK_MAX_BYTES = 1024 * 1024 * 1024  # whole banks legitimately get large
@@ -1414,11 +1414,9 @@ class _GameReader:
             self.progress.step("decrypting game-data chunks")
         for idx, chunk in enumerate(chunks, start=1):
             if self.progress is not None:
-                # Image/sound bank readers switch the reporter to their own
-                # sub-phase while decoding; bring the chunk loop back to the
-                # "chunks" phase first, so the next tick counts chunks
-                # (without this, chunk 42 of 428 ticks against the sound
-                # bank's 1-sound total and shows 4200%).
+                # Image-bank decoding switches the reporter to its own
+                # sub-phase. Bring the chunk loop back to "chunks" first so
+                # the next tick keeps counting game-data chunks correctly.
                 if self.progress.phase_id != "chunks":
                     self.progress.phase("chunks", total=len(chunks))
                 self.progress.tick(idx, step=f"decrypting chunk {idx}/{len(chunks)}")
@@ -1426,6 +1424,11 @@ class _GameReader:
                 # Frames reference objects/banks, so interpret them after
                 # everything else has been assembled.
                 frame_chunks.append(chunk)
+                continue
+            if (chunk.id == CHUNK_SOUND_BANK and
+                    not audio.EXTRACTION_ENABLED):
+                # Do not even decrypt/decompress the audio chunk.  Its raw
+                # bytes have no bearing on frames, images, or event blocks.
                 continue
             # Large RC4-encrypted chunks take a while in pure Python; report
             # the byte count so the display keeps moving.

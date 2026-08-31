@@ -246,7 +246,7 @@ def main(argv=None) -> int:
     report = result["report"]
     print(f"Converted '{mfa.name or args.input}' -> {out}")
     print(f"Frames: {len(mfa.frames)}, Images: {len(mfa.images)}, "
-          f"Sounds: {len(mfa.sounds)}, Sprites: {report.get('sprites', 0)}")
+          f"Sprites: {report.get('sprites', 0)}")
     print(f"Events: {report.get('events_total', 0)} groups, "
           f"{report.get('events_mapped', 0)} compiled to "
           f"{report.get('blocks', 0)} Scratch blocks"

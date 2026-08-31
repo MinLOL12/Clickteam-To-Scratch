@@ -61,7 +61,7 @@
   const PHASES = [
     ['detect','Detect input'],['read','Read file'],['pack','EXE pack'],['gamedata','Game data'],
     ['chunks','Decrypt chunks'],['objects','Objects'],['frames','Frames'],['images','Images → PNG'],
-    ['sounds','Sounds'],['events','Events'],['build','Build project'],['transpile','Events → Blocks'],
+    ['events','Events'],['build','Build project'],['transpile','Events → Blocks'],
     ['zip','Pack .sb3'],
   ];
   const ORDER = PHASES.map((p) => p[0]);
@@ -134,7 +134,7 @@
     for (const w of ev.warnings || []) addEntry('warn', w);
     if (ev.type === 'done' && ev.stats) {
       const box = $('counters'); box.innerHTML = '';
-      const counters = [['images','Images → PNG'],['sprites','Sprites'],['sounds','Sounds'],
+      const counters = [['images','Images → PNG'],['sprites','Sprites'],
         ['events_mapped','Events → blocks'],['blocks','Blocks emitted'],['frames','Frames']];
       for (const [key, label] of counters) {
         const v = ev.stats[key];
