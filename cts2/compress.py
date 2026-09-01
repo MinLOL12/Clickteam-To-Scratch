@@ -59,25 +59,67 @@ def zlib_decompress_bounded(data: bytes, max_out: int,
     return bytes(out)
 
 
-def lz4_block_decompress(data: bytes, expected: int) -> bytes:
+_LZ4_UNSET = object()
+_LZ4_BLOCK = _LZ4_UNSET
+
+
+def lz4_block_decompress(data: bytes, expected: int,
+                         tolerant: bool = False) -> bytes:
     """Decompress a raw LZ4 *block* (no frame header) into ``expected`` bytes.
 
     Fusion 2.5+ EXEs store image pixels this way. Uses the optional
     ``lz4.block`` accelerator when it is installed and falls back to a
     small pure-Python decoder otherwise, so the converter never needs
     third-party packages.
+
+    ``tolerant`` hands back whatever was decoded before the stream went bad
+    instead of raising — that is what the MFA reader wants (a partial image
+    still beats no image); the EXE reader keeps the strict behaviour so the
+    broken image is reported and replaced by a placeholder.
+
+    Whether the accelerator exists is decided *once*: re-running ``import``
+    for a missing module walks all of ``sys.path`` with stat() calls, and
+    this function is called once per image — thousands of times for a game.
     """
-    try:
-        import lz4.block  # type: ignore
+    global _LZ4_BLOCK
+    if _LZ4_BLOCK is _LZ4_UNSET:
+        try:
+            from lz4 import block as _block  # type: ignore
 
-        return bytes(lz4.block.decompress(data, uncompressed_size=expected))
-    except Exception:
-        pass
-    return _lz4_block_py(data, expected)
+            _LZ4_BLOCK = _block
+        except Exception:  # noqa: BLE001 - optional dependency
+            _LZ4_BLOCK = None
+    if _LZ4_BLOCK is not None:
+        try:
+            return bytes(_LZ4_BLOCK.decompress(data, uncompressed_size=expected))
+        except Exception:  # noqa: BLE001 - fall through to the Python decoder
+            # The library enforces stream rules Fusion's own encoder does not
+            # always respect (last-match length, trailing literals), so a
+            # hand-written or slightly odd bank block can be rejected there
+            # while decoding fine here.  Prefer the Python result — including
+            # its partial output — so the conversion does not depend on
+            # whether this optional package happens to be installed.
+            fallback = _lz4_block_py(data, expected, tolerant=True)
+            if not tolerant and len(fallback) < expected:
+                raise
+            return fallback
+    return _lz4_block_py(data, expected, tolerant=tolerant)
 
 
-def _lz4_block_py(data: bytes, expected: int) -> bytes:
+def _lz4_block_py(data: bytes, expected: int, tolerant: bool = False) -> bytes:
+    """Standard-library LZ4 block decoder.
+
+    With ``tolerant`` a corrupt stream yields the output decoded so far
+    instead of an exception (the MFA path); otherwise every inconsistency
+    raises, so callers can fall back to a placeholder costume.
+    """
     out = bytearray()
+
+    def fail(message: str) -> bytes:
+        if tolerant:
+            return bytes(out[:expected])
+        raise ValueError(message)
+
     i = 0
     n = len(data)
     while i < n:
@@ -95,7 +137,7 @@ def _lz4_block_py(data: bytes, expected: int) -> bytes:
                 if extra != 255:
                     break
         if i + lit_len > n:
-            raise ValueError("LZ4 block: literals run past end of input")
+            return fail("LZ4 block: literals run past end of input")
         out.extend(data[i : i + lit_len])
         i += lit_len
 
@@ -103,12 +145,12 @@ def _lz4_block_py(data: bytes, expected: int) -> bytes:
             # Streams are allowed to end after the final literals.
             break
         if i + 2 > n:
-            raise ValueError("LZ4 block: truncated match offset")
+            return fail("LZ4 block: truncated match offset")
 
         offset = data[i] | (data[i + 1] << 8)
         i += 2
         if offset == 0 or offset > len(out):
-            raise ValueError(f"LZ4 block: invalid match offset {offset}")
+            return fail(f"LZ4 block: invalid match offset {offset}")
 
         match_len = (token & 0x0F) + 4
         if (token & 0x0F) == 15:
@@ -119,9 +161,19 @@ def _lz4_block_py(data: bytes, expected: int) -> bytes:
                 if extra != 255:
                     break
 
+        # A run whose offset is shorter than its length (the usual case for a
+        # flat sprite area) repeats the same `offset` bytes over and over:
+        # build it with C-level repetition instead of appending one byte at a
+        # time, which is what made a single solid image stall the conversion.
         start = len(out) - offset
-        for k in range(match_len):
-            out.append(out[start + k])
+        if match_len <= offset:
+            out += out[start : start + match_len]
+        else:
+            period = bytes(out[start:])                  # == offset bytes
+            reps, rest = divmod(match_len, offset)
+            out += period * reps
+            if rest:
+                out += period[:rest]
         if len(out) >= expected:
             break
     return bytes(out[:expected])

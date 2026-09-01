@@ -167,11 +167,44 @@ before decryption/decompression, and MFA sound payloads are advanced over
 without being copied, decoded, retained, or exported. This keeps audio from
 blocking conversion while the visual and event paths are stabilised.
 
+### How the decryption stays fast
+
+The game-data chunks are encrypted with a modified RC4 whose key comes from the
+app name, the copyright string and the editor filename. Reading a large game in
+pure Python is dominated by that stream cipher, so:
+
+- **The keystream is generated once per key, not once per chunk.** Fusion
+  restarts the cipher at byte zero for every chunk, so all chunks of a game
+  share one stream. It is grown in 1 MiB slices, XOR applied with whole-integer
+  arithmetic, and reused by every later chunk (a stream longer than 64 MiB is
+  generated on demand rather than cached, so a huge bank cannot pin a copy of
+  itself in memory).
+- **Only chunks the converter reads are decrypted.** Icons, embedded binaries
+  and other payloads — tens of megabytes in commercial games — are skipped
+  outright instead of being decrypted and thrown away. One note in the report
+  says how much was left alone.
+- **Progress is per byte, not per chunk.** A chunk over 1 MiB reports bytes
+  decrypted, so a big image bank shows movement rather than appearing frozen.
+- Key material is clamped to the runtime's 254-byte buffer: long or non-ASCII
+  game names truncate the key exactly like the Clickteam runtime does, instead
+  of failing every encrypted chunk in the game.
+
+LZ4 image payloads use the optional `lz4` package when installed and a
+pure-Python decoder otherwise. That fallback decodes literal runs and match
+runs in blocks (a solid-colour area used to copy one byte at a time, which is
+what made a single large sprite stall), and the MFA reader accepts a partial
+decode from it where the EXE reader keeps the strict behaviour and reports the
+broken image.
+
 Remaining zlib payloads (font/image banks, chunks, EXE pack entries) are
 decompressed **with a hard output cap** (128 MiB per image, 1 GiB per
 chunk). A tiny corrupt or hostile stream can otherwise expand to gigabytes;
 over-limit entries are skipped with a warning and conversion continues with
-everything else.
+everything else. The same idea guards the *shape* of parsed data: the compiled
+event reader caps how many event groups it will accept per program, so a
+mis-read length field resyncs the chunk instead of spinning (a warning names the
+frame). PNG costumes are written with filter type 0 at zlib level 6 — level 9
+cost roughly a third of the total conversion time for a few percent of size.
 
 ## Tests
 

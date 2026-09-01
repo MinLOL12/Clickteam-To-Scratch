@@ -535,63 +535,22 @@ def _lzx_decompress(data: bytes, expected: int) -> bytes:
     Fusion 2.5 MFA files use a standard zlib stream here (the 0x78 0x9c header
     is what saves the PNG-in-MFA images). A small LZ4 fallback is kept for
     export files created by CTFAK 2.5+.
+
+    A corrupt stream is *tolerated* here — a partially decoded image still
+    gives a usable costume — so the shared decoder is asked for its forgiving
+    mode instead of duplicating a second copy of it.
     """
+    from .compress import lz4_block_decompress
+
     try:
         out = zlib_decompress_bounded(data, max(expected * 2, _MFA_MAX_BYTES))
         return out[:expected]
     except Exception:
         pass
     try:
-        import lz4.block  # type: ignore
-
-        return lz4.block.decompress(data, uncompressed_size=expected)
+        return lz4_block_decompress(data, expected, tolerant=True)
     except Exception:
-        pass
-
-    # Pure-python LZ4 block fallback.
-    out = bytearray()
-    i = 0
-    n = len(data)
-    try:
-        while i < n:
-            token = data[i]
-            i += 1
-            lit_len = token >> 4
-            if lit_len == 15:
-                while i < n:
-                    extra = data[i]
-                    i += 1
-                    lit_len += extra
-                    if extra != 255:
-                        break
-            if i + lit_len > n:
-                return bytes(out)
-            out.extend(data[i : i + lit_len])
-            i += lit_len
-            if i >= n:
-                break
-            if i + 2 > n:
-                break
-            offset = data[i] | (data[i + 1] << 8)
-            i += 2
-            match_len = (token & 0x0F) + 4
-            if (token & 0x0F) == 15:
-                while i < n:
-                    extra = data[i]
-                    i += 1
-                    match_len += extra
-                    if extra != 255:
-                        break
-            if offset <= 0 or offset > len(out):
-                return bytes(out)
-            start = len(out) - offset
-            for k in range(match_len):
-                out.append(out[start + k])
-            if len(out) >= expected:
-                break
-    except Exception:
-        pass
-    return bytes(out[:expected])
+        return b""
 
 
 def _read_transition(r: Reader) -> Optional[dict]:

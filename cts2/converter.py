@@ -251,6 +251,27 @@ def load_project(path: str, ctfak: Optional[str] = None,
 _load_mfa_from_any = load_project
 
 
+def _merge_progress_warnings(report: dict, progress) -> None:
+    """Fold the *readers'* warnings into the SB3 report.
+
+    The game-data and MFA readers stream their warnings live (unreadable
+    frame, broken image, skipped event body…) but they never see this report,
+    so a conversion that quietly dropped half a game used to finish with a
+    summary claiming "no warnings".  The reporter's list is already
+    de-duplicated and capped, so it can be appended as it stands.
+    """
+    listed = report.setdefault("warnings", [])
+    seen = set(listed)
+    for w in getattr(progress, "warnings", None) or ():
+        if w not in seen:
+            seen.add(w)
+            listed.append(w)
+    suppressed = getattr(progress, "suppressed_warnings", 0)
+    if suppressed:
+        listed.append(f"{suppressed} further warning(s) were not listed "
+                      "(duplicates, or beyond the display cap)")
+
+
 def convert_file(input_path: str, output_path: Optional[str] = None,
                  report_path: Optional[str] = None,
                  ctfak: Optional[str] = None,
@@ -265,6 +286,7 @@ def convert_file(input_path: str, output_path: Optional[str] = None,
     sb3, report = build_project(mfa, progress)
     if notes:
         report.setdefault("notes", []).extend(notes)
+    _merge_progress_warnings(report, progress)
     _note_audio_policy(report, progress)
     if output_path:
         progress.step(f"writing {os.path.basename(output_path)}")
@@ -290,6 +312,7 @@ def convert_bytes(data: bytes, input_name: str = "project.mfa",
     sb3, report = build_project(mfa, progress)
     if notes:
         report.setdefault("notes", []).extend(notes)
+    _merge_progress_warnings(report, progress)
     _note_audio_policy(report, progress)
     progress.finish({"sprites": report.get("sprites", 0),
                      "blocks": report.get("blocks", 0),

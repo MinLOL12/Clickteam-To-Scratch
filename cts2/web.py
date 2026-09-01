@@ -285,14 +285,28 @@ function setPhaseState(id, state){
   });
 }
 
+let entryNodes = 0, warnNodes = 0;
+const shownEntries = new Set();   // messages already on screen (O(1) lookup)
+const MAX_ENTRIES = 400;          // the converter caps its list too
+
 function addEntry(type, text){
   const list = $('entries');
+  if (entryNodes >= MAX_ENTRIES){
+    if (entryNodes === MAX_ENTRIES){
+      list.appendChild(el('div','entry note','… further messages are in the summary'));
+      entryNodes++;
+    }
+    return;                      // never grow the panel unboundedly
+  }
+  entryNodes++;
   const e = el('div', 'entry ' + type);
   e.appendChild(el('span','ic', type === 'warn' ? '⚠' : '·'));
   e.appendChild(document.createTextNode(text));
   list.appendChild(e);
   const card = $('warnCard'); card.classList.remove('hidden');
-  $('warnCount').textContent = list.querySelectorAll('.entry.warn').length + ' warning(s)';
+  if (type === 'warn') warnNodes++;
+  // O(1) counter instead of a querySelectorAll scan per appended line.
+  $('warnCount').textContent = warnNodes + ' warning(s)';
   list.scrollTop = list.scrollHeight;
 }
 
@@ -302,6 +316,7 @@ function start(file){
   $('fileName').textContent = '— ' + file.name;
   $('panel').classList.remove('hidden');
   $('warnCard').classList.add('hidden'); $('entries').innerHTML = '';
+  entryNodes = 0; warnNodes = 0; shownEntries.clear();
   $('doneCard').classList.add('hidden'); $('logCard').classList.add('hidden');
   $('bar').classList.remove('done','err');
   $('pctBig').textContent = '0%'; $('overallPct').textContent = '0%';
@@ -343,10 +358,12 @@ function render(ev){
   $('stepText').textContent = ev.step || '';
   $('barLabel').textContent = (ev.step || ev.phase_title || '');
   $('elapsed').textContent = ((performance.now() - t0)/1000).toFixed(1) + 's';
-  if (ev.type === 'warn' || (ev.type === 'progress' && ev.warnings && ev.warnings.length)){
-    // live warnings: show any that aren't already listed
-    const shown = new Set($('entries').textContent.split('\n'));
-    for (const w of (ev.warnings || [])){ if (!shown.has(w)) addEntry('warn', w); }
+  if (ev.type === 'warn' || ev.type === 'note' || (ev.warnings && ev.warnings.length) || (ev.notes && ev.notes.length)){
+    // live warnings/notes: show any that aren't already listed. A Set is used
+    // instead of scanning the panel's text, which re-serialised the whole
+    // list for every single event and froze the page on chatty conversions.
+    for (const w of (ev.warnings || [])){ if (!shownEntries.has(w)){ shownEntries.add(w); addEntry('warn', w); } }
+    for (const t of (ev.notes || [])){ if (!shownEntries.has(t)){ shownEntries.add(t); addEntry('note', t); } }
   }
   if (ev.phase && ev.phase !== lastOverall){ setPhaseState(ev.phase, 'active'); }
   const order = PHASES.map(p => p[0]);
