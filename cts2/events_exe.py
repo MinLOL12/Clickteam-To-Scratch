@@ -40,6 +40,11 @@ EVENT_GROUP = b"ERev"
 EVENT_OPTIONS = b"ERop"
 END = b"<<ER"
 
+#: Hard ceiling on how many event groups one frame body contributes.  A
+#: corrupt size field could otherwise claim hundreds of megabytes of groups;
+#: reading them one by one looks exactly like a conversion that hangs.
+_MAX_EVENT_GROUPS = 200000
+
 
 def _read_parameter(r: Reader) -> Optional[Parameter]:
     if r.remaining() < 4:
@@ -275,6 +280,7 @@ def read_exe_events(data: bytes, build: int = 0) -> Tuple[List[EventGroup], List
                 warnings.append(f"events body has implausible size {size}")
                 break
             end = r.tell() + size
+            before = len(groups)
             while r.tell() < end and r.remaining() > 0:
                 eg = _read_event_group(r, build)
                 if eg is None:
@@ -285,6 +291,14 @@ def read_exe_events(data: bytes, build: int = 0) -> Tuple[List[EventGroup], List
                     r.seek(end)
                     break
                 groups.append(eg)
+                if len(groups) - before >= _MAX_EVENT_GROUPS:
+                    warnings.append(
+                        f"event group cap ({_MAX_EVENT_GROUPS}) reached in an "
+                        f"events body of {size} bytes; the rest of the body "
+                        "was skipped"
+                    )
+                    r.seek(end)
+                    break
             r.seek(end)
         elif ident == END or ident == b"  <<":
             break
@@ -294,11 +308,17 @@ def read_exe_events(data: bytes, build: int = 0) -> Tuple[List[EventGroup], List
             # event groups.  Try raw groups once, otherwise stop.
             if not saw_header and not groups:
                 r.seek(r.tell() - 4)
-                while r.remaining() >= 12:
+                while (r.remaining() >= 12 and len(groups) < _MAX_EVENT_GROUPS):
                     eg = _read_event_group(r, build)
                     if eg is None:
                         break
                     groups.append(eg)
+                if len(groups) >= _MAX_EVENT_GROUPS:
+                    warnings.append(
+                        f"event group cap ({_MAX_EVENT_GROUPS}) reached while "
+                        "resyncing on an unrecognised events payload; the "
+                        "rest of the frame's events were skipped"
+                    )
                 if groups:
                     warnings.append(
                         "events chunk lacked ER>> header; read raw groups"

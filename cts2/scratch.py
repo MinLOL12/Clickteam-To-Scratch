@@ -243,14 +243,10 @@ def solid_png(width: int, height: int, rgba: tuple) -> bytes:
     h = max(int(height), 1)
     r, g, b = rgba[0], rgba[1], rgba[2]
     a = rgba[3] if len(rgba) > 3 else 255
-    pixels = bytearray(w * h * 4)
-    for i in range(w * h):
-        j = i * 4
-        pixels[j] = r
-        pixels[j + 1] = g
-        pixels[j + 2] = b
-        pixels[j + 3] = a
-    return encode_png(w, h, bytes(pixels))
+    # One repeated pixel quad: building it per pixel cost a Python loop over
+    # every pixel of every stage backdrop.
+    pixels = bytes((r, g, b, a)) * (w * h)
+    return encode_png(w, h, pixels)
 
 
 def _transparent_png() -> bytes:
@@ -401,16 +397,18 @@ def _placeholder_png(width: int, height: int, name: str) -> bytes:
     from .png import encode_png
     w = max(int(width or 32), 1)
     h = max(int(height or 32), 1)
-    pixels = bytearray(w * h * 4)
-    for y in range(h):
-        for x in range(w):
-            i = (y * w + x) * 4
-            edge = x < 2 or y < 2 or x >= w - 2 or y >= h - 2
-            if edge:
-                pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3] = 0x7A, 0x00, 0x40, 255
-            else:
-                pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3] = 0xD8, 0x00, 0x73, 255
-    return encode_png(w, h, bytes(pixels))
+    edge_px = bytes((0x7A, 0x00, 0x40, 255))
+    fill_px = bytes((0xD8, 0x00, 0x73, 255))
+    edge_row = edge_px * w
+    # Rows are uniform per band (border rows, then identical inner rows), so
+    # they are built by repetition instead of walking every pixel: a bank of
+    # failures used to pay a Python loop per *pixel* of every placeholder.
+    mid_row = (edge_px * 2 + fill_px * (w - 4) + edge_px * 2) if w > 4 else edge_row
+    top = min(2, h)
+    bottom = min(2, max(0, h - 2))
+    middle = h - top - bottom
+    pixels = edge_row * top + mid_row * middle + edge_row * bottom
+    return encode_png(w, h, pixels)
 
 
 def _collect_sprite_handles(frame: Frame, sprites: List[TargetBuilder],

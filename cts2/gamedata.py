@@ -119,6 +119,21 @@ CHUNK_FONT_BANK = 26215
 CHUNK_SOUND_BANK = 26216
 CHUNK_LAST = 32639  # 0x7F7F
 
+# Chunk ids whose payload the SB3 export actually consumes.  Everything else
+# (app icon, embedded binaries, shaders, TTF payloads, extension data …) is
+# left *undecrypted*: those payloads can be tens of megabytes, and running
+# them through the cipher in pure Python to throw the result away is exactly
+# what made big games sit on "decrypting chunk …" for minutes.
+_USED_CHUNK_IDS = frozenset((
+    CHUNK_APP_HEADER, CHUNK_APP_NAME, CHUNK_APP_AUTHOR,
+    CHUNK_FRAME_ITEMS_OLD1, CHUNK_FRAME_HANDLES, CHUNK_EDITOR_FILENAME,
+    CHUNK_TARGET_FILENAME, CHUNK_GLOBAL_VALUES, CHUNK_GLOBAL_STRINGS,
+    CHUNK_EXTENSIONS, CHUNK_COPYRIGHT, CHUNK_FRAME_ITEMS_OLD2,
+    CHUNK_FRAME_ITEMS_25, CHUNK_FRAME_ITEM_NAMES_25,
+    CHUNK_FRAME_ITEM_PROPS_25, CHUNK_FRAME, CHUNK_IMAGE_BANK,
+    CHUNK_FONT_BANK, CHUNK_SOUND_BANK,
+))
+
 # frame sub-chunks
 FRAME_HEADER = 13108
 FRAME_NAME = 13109
@@ -182,6 +197,28 @@ class _ObjectInfo:
 # --------------------------------------------------------------------------
 # modified-RC4 decryption used by newer Fusion builds
 # --------------------------------------------------------------------------
+#
+# The chunk cipher is a plain XOR with a keystream produced by a modified
+# RC4 PRGA, and the runtime re-initialises that PRGA *for every chunk*.  Two
+# facts follow, and both are exploited below:
+#
+# 1. The keystream does not depend on the payload at all, so every chunk
+#    encrypted with the same (name, copyright, editor filename) materials
+#    uses the *same* stream.  A game decrypts thousands of payloads this way
+#    (each frame/object-info sub-chunk restarts the cipher), so generating
+#    the stream once per key and re-using it is exactly equivalent — and it
+#    is the difference between a conversion that finishes and one that looks
+#    stuck on "decrypting chunk …" for minutes.
+# 2. Once the stream exists the XOR is a whole-buffer operation, so it runs
+#    on multi-megabyte slices with big-integer arithmetic instead of a
+#    per-byte Python loop (~4 MiB/s -> ~250 MiB/s).
+
+_KEY_BYTES = 256            # the runtime's fixed-size key buffer
+_KEY_PAYLOAD_MAX = 254      # leaves room for the checksum byte at data_len + 1
+_KEYSTREAM_SLICE = 1 << 20  # keystream granularity (also the progress step)
+_XOR_SLICE = 1 << 22        # payload granularity for the bulk XOR
+_KEYSTREAM_CACHE_MAX = 64 << 20   # never keep more than this per key
+
 
 def _rotate(value: int) -> int:
     return ((value << 7) | (value >> 1)) & 0xFF
@@ -198,12 +235,31 @@ def _key_string(text: str) -> bytes:
     return bytes(out)
 
 
+def _fmt_size(n: int) -> str:
+    """Human-readable byte count, used in the informational notes only."""
+    if n >= (1 << 20):
+        return f"{n / (1 << 20):.1f} MiB"
+    if n >= (1 << 10):
+        return f"{n / (1 << 10):.0f} KiB"
+    return f"{n} bytes"
+
+
 def _make_key(data1: str, data2: str, data3: str) -> bytes:
-    """Build the 256-byte chunk-decryption key from three strings."""
+    """Build the 256-byte chunk-decryption key from three strings.
+
+    The runtime copies the three strings into a *fixed* 256-byte buffer, so
+    key material past that point simply does not exist.  Games with a long
+    name plus a long copyright line (or non-ASCII names, which count as two
+    key bytes per character) therefore must not be truncated "later" — and
+    must not raise either: an exception here used to abort the decryption of
+    *every* encrypted chunk of the game.
+    """
     data = bytearray(_key_string(data1 or "") + _key_string(data2 or "") +
                      _key_string(data3 or ""))
+    if len(data) > _KEY_PAYLOAD_MAX:
+        del data[_KEY_PAYLOAD_MAX:]      # mirror the runtime's buffer
     data_len = len(data)
-    data.extend(b"\x00" * (256 - data_len))
+    data.extend(b"\x00" * (_KEY_BYTES - data_len))
     last_key_byte = MAGIC_CHAR
     v34 = MAGIC_CHAR
     for i in range(data_len + 1):
@@ -237,47 +293,152 @@ def _init_decryption_table(magic_key: bytes) -> bytes:
     return bytes(buf)
 
 
+class _KeyStream:
+    """The modified-RC4 keystream for one table, generated lazily and reused.
+
+    ``need(n)`` returns the keystream grown to at least ``n`` bytes.  The
+    generator keeps its own permuted state, so growing is incremental: the
+    per-byte Python loop runs once per key for the *longest* payload, not
+    once per payload.  Streams longer than ``_KEYSTREAM_CACHE_MAX`` are
+    produced on demand instead of being cached, so a hundred-megabyte bank
+    cannot pin a copy of itself in memory.
+    """
+
+    __slots__ = ("table", "buf", "_state", "cache")
+
+    def __init__(self, table: bytes, cache: bool = True):
+        self.table = table
+        self.buf = bytearray()
+        # (S, i, j) — the live RC4 state after len(buf) keystream bytes.
+        self._state: Tuple[list, int, int] = (list(table), 0, 0)
+        self.cache = cache
+
+    def need(self, n: int,
+             on_progress: Optional[Callable[[int, int], None]] = None
+             ) -> bytearray:
+        """Return the keystream with at least ``n`` bytes available."""
+        if n <= len(self.buf):
+            return self.buf
+        if self.cache and n > _KEYSTREAM_CACHE_MAX:
+            # Too big to keep: generate a throw-away stream from a fresh
+            # state (exactly what one chunk of its own would do) and leave
+            # the cached prefix usable for the next chunk.
+            return _keystream(n, self.table, on_progress=on_progress)
+        while len(self.buf) < n:
+            step = min(_KEYSTREAM_SLICE, n - len(self.buf))
+            self._grow(step)
+            if on_progress is not None:
+                on_progress(len(self.buf), n)
+        return self.buf
+
+    def _grow(self, count: int) -> None:
+        s, i, j = self._state
+        buf = self.buf
+        append = buf.append
+        for _ in range(count):
+            i = (i + 1) & 0xFF
+            si = s[i]
+            j = (j + si) & 0xFF
+            sj = s[j]
+            s[i] = sj
+            s[j] = si
+            append(s[(si + sj) & 0xFF])
+        self._state = (s, i, j)
+
+
+def _keystream(n: int, table: bytes,
+               on_progress: Optional[Callable[[int, int], None]] = None
+               ) -> bytearray:
+    """Generate ``n`` keystream bytes from a fresh state (no caching)."""
+    stream = _KeyStream(table, cache=False)
+    if n <= 0:
+        return stream.buf
+    while len(stream.buf) < n:
+        stream._grow(min(_KEYSTREAM_SLICE, n - len(stream.buf)))
+        if on_progress is not None:
+            on_progress(len(stream.buf), n)
+    return stream.buf
+
+
+def _xor_into(data: bytearray, start: int, end: int, stream) -> None:
+    """XOR ``data[start:end]`` with ``stream[start:end]``, in place."""
+    key = stream[start:end]
+    data[start:end] = (int.from_bytes(data[start:end], "little") ^
+                       int.from_bytes(key, "little")).to_bytes(end - start,
+                                                               "little")
+
+
+def _xor_bytes(data, stream, offset: int = 0) -> bytes:
+    """``data`` XOR the keystream slice starting at ``offset``.
+
+    Big-integer arithmetic does the actual work: one pass over the buffer
+    in C instead of one Python bytecode storm per byte.  Long payloads are
+    handled in ``_XOR_SLICE`` chunks so peak memory stays bounded.
+    """
+    n = len(data)
+    if n <= 0:
+        return b""
+    if n <= _XOR_SLICE:
+        key = stream[offset:offset + n]
+        return (int.from_bytes(data, "little") ^
+                int.from_bytes(key, "little")).to_bytes(n, "little")
+    pieces = []
+    pos = 0
+    while pos < n:
+        size = min(_XOR_SLICE, n - pos)
+        piece = data[pos:pos + size]
+        key = stream[offset + pos:offset + pos + size]
+        pieces.append((int.from_bytes(piece, "little") ^
+                       int.from_bytes(key, "little")).to_bytes(size,
+                                                               "little"))
+        pos += size
+    return b"".join(pieces)
+
+
 def _transform_chunk(data: bytearray, table: bytes,
                      on_progress: Optional[Callable[[int, int], None]] = None
                      ) -> bytearray:
-    """Modified RC4 PRGA, applied in place.
+    """Modified RC4 PRGA XOR, applied in place.
 
-    ``on_progress(done_bytes, total_bytes)`` is invoked (at most every
-    1 MiB and at the end) so callers can report on long decryptions —
-    a single large encrypted chunk can take many seconds in pure Python,
-    and without it the progress display looks frozen.
+    ``on_progress(done_bytes, total_bytes)`` is invoked (every 1 MiB and at
+    the end) so callers can report on long decryptions; a single huge chunk
+    still has to be walked once, and the display must not look frozen.
     """
-    buf = bytearray(table)
-    i = 0
-    i2 = 0
-    if on_progress is None:
-        for j in range(len(data)):
-            i = (i + 1) & 0xFF
-            i2 = (i2 + buf[i]) & 0xFF
-            buf[i2], buf[i] = buf[i], buf[i2]
-            data[j] ^= buf[(buf[i] + buf[i2]) & 0xFF]
-        return data
     n = len(data)
-    last = -1 << 20  # report on the first step
-    for j in range(n):
-        i = (i + 1) & 0xFF
-        i2 = (i2 + buf[i]) & 0xFF
-        buf[i2], buf[i] = buf[i], buf[i2]
-        data[j] ^= buf[(buf[i] + buf[i2]) & 0xFF]
-        if j - last >= 1 << 20:
-            last = j
-            on_progress(j, n)
-    on_progress(n, n)
+    if n <= 0:
+        return data
+    stream = _KeyStream(table, cache=False)
+    pos = 0
+    while pos < n:
+        end = min(pos + _KEYSTREAM_SLICE, n)
+        stream.need(end)
+        _xor_into(data, pos, end, stream.buf)
+        pos = end
+        if on_progress is not None:
+            on_progress(pos, n)
     return data
 
 
 class _Decryptor:
-    """Keeps the decryption table for the current key materials."""
+    """Caches the table *and* the keystream for the current key materials.
+
+    Every encrypted payload of a game uses the same key (name, copyright,
+    editor filename) and restarts the cipher from byte zero, so one cached
+    stream serves all of them — thousands of sub-chunks included.
+    """
 
     def __init__(self, build: int):
         self.build = build
         self._table: Optional[bytes] = None
         self._table_key: Optional[tuple] = None
+        self._key_for: Optional[tuple] = None
+        self._stream: Optional[_KeyStream] = None
+
+    def _key_material(self, name: str, copyright_: str,
+                      editor: str) -> Tuple[str, str, str]:
+        if self.build > 284:
+            return (name, copyright_, editor)
+        return (editor, name, copyright_)
 
     def _table_for(self, name: str, copyright_: str, editor: str) -> bytes:
         if self.build > 284:
@@ -286,14 +447,23 @@ class _Decryptor:
             key = _make_key(editor, name, copyright_)
         return _init_decryption_table(key)
 
+    def _stream_for(self, name: str, copyright_: str,
+                    editor: str) -> _KeyStream:
+        # The key-material *tuple* identifies the cached stream; the build
+        # dependent ordering is applied once, inside ``_table_for``.
+        material = self._key_material(name, copyright_, editor)
+        if material != self._key_for or self._stream is None:
+            self._key_for = material
+            self._stream = _KeyStream(self._table_for(name, copyright_,
+                                                       editor))
+        return self._stream
+
     def decode(self, data: bytes, chunk_id: int, name: str, copyright_: str,
                editor: str,
                on_progress: Optional[Callable[[int, int], None]] = None
                ) -> bytes:
-        table = self._table_for(name, copyright_, editor)
-        buf = bytearray(data)
-        _transform_chunk(buf, table, on_progress)
-        return bytes(buf)
+        stream = self._stream_for(name, copyright_, editor)
+        return _xor_bytes(data, stream.need(len(data), on_progress))
 
     def decode_mode3(self, data: bytes, chunk_id: int, name: str,
                      copyright_: str, editor: str,
@@ -302,12 +472,11 @@ class _Decryptor:
         """Flag 3: [decompSize u32] + encrypted [compSize u32 + zlib]."""
         if len(data) < 4:
             raise ValueError("encrypted chunk too small")
-        decompressed_size = struct.unpack_from("<I", data, 0)[0]
         raw = bytearray(data[4:])
         if (chunk_id & 1) == 1 and self.build > 284:
             raw[0] ^= (chunk_id & 0xFF) ^ (chunk_id >> 8)
-        _transform_chunk(raw, self._table_for(name, copyright_, editor),
-                         on_progress)
+        stream = self._stream_for(name, copyright_, editor)
+        _xor_into(raw, 0, len(raw), stream.need(len(raw), on_progress))
         if len(raw) < 4:
             raise ValueError("encrypted chunk too small")
         comp_size = struct.unpack_from("<I", raw, 0)[0]
@@ -714,6 +883,7 @@ class _GameReader:
         self.frames: List[Frame] = []
         self.event_sizes: List[int] = []
         self.warnings: List[str] = []
+        self.info_notes: List[str] = []
         self.decryptor: Optional[_Decryptor] = None
         self.missing_object_notes: List[str] = []
         self.progress = None  # cts2.progress.Reporter (optional)
@@ -723,6 +893,12 @@ class _GameReader:
         self.warnings.append(msg)
         if self.progress is not None:
             self.progress.warn(msg)
+
+    def info(self, msg: str) -> None:
+        """Record an informational note (also shown live in every UI)."""
+        self.info_notes.append(msg)
+        if self.progress is not None:
+            self.progress.note(msg)
 
     # -- chunk interpreters -------------------------------------------------
 
@@ -1372,14 +1548,15 @@ class _GameReader:
 
     # -- top level ----------------------------------------------------------
 
-    def _chunk_bytes_progress(self, idx: int, total_chunks: int):
+    def _chunk_bytes_progress(self, idx: int, total_chunks: int,
+                              label: str = "chunk"):
         """Step-text callback for slow in-place RC4 on a big encrypted chunk."""
         prog = self.progress
 
         def report(done: int, total: int) -> None:
             prog.step(
-                f"decrypting chunk {idx}/{total_chunks} "
-                f"({done >> 20}/{total >> 20} MiB)"
+                f"decrypting {label} {idx}/{total_chunks} "
+                f"({done >> 20}/{max(total, 1) >> 20} MiB)"
             )
 
         return report
@@ -1409,6 +1586,8 @@ class _GameReader:
 
         header_25 = names_25 = props_25 = None
         frame_chunks = []
+        unused_chunks = 0
+        unused_bytes = 0
         if self.progress is not None:
             self.progress.phase("chunks", total=len(chunks))
             self.progress.step("decrypting game-data chunks")
@@ -1429,6 +1608,12 @@ class _GameReader:
                     not audio.EXTRACTION_ENABLED):
                 # Do not even decrypt/decompress the audio chunk.  Its raw
                 # bytes have no bearing on frames, images, or event blocks.
+                continue
+            if chunk.id not in _USED_CHUNK_IDS:
+                # Nothing in the SB3 export reads this payload, so the
+                # cipher is never run over it.
+                unused_chunks += 1
+                unused_bytes += chunk.size
                 continue
             # Large RC4-encrypted chunks take a while in pure Python; report
             # the byte count so the display keeps moving.
@@ -1491,11 +1676,25 @@ class _GameReader:
         if header_25 is not None:
             self._read_frame_items_25(header_25, names_25, props_25)
 
+        if unused_chunks:
+            self.info(
+                f"{unused_chunks} chunk(s) totalling {_fmt_size(unused_bytes)} "
+                "were left undecrypted (icons, embedded binaries, shaders, "
+                "fonts: nothing in the SB3 export reads them)"
+            )
+
         # Now that objects, globals and banks exist, interpret the frames.
         if self.progress is not None and frame_chunks:
             self.progress.phase("frames", total=len(frame_chunks))
         for idx, chunk in enumerate(frame_chunks, start=1):
-            data = self._decoded(chunk, decryptor)
+            data = self._decoded(
+                chunk, decryptor,
+                on_progress=(
+                    self._chunk_bytes_progress(idx, len(frame_chunks), "frame")
+                    if (self.progress is not None and chunk.flags in (2, 3)
+                        and len(chunk.raw) >= 1 << 20)
+                    else None
+                ))
             if data is None:
                 continue
             if self.progress is not None:
@@ -1706,6 +1905,7 @@ def load_game_data_from_exe(source, progress=None) -> Tuple[MFA, List[str]]:
             f"programs ({total} bytes total); decoded {decoded} event "
             f"group(s) for Scratch block conversion"
         )
+    notes.extend(reader.info_notes)
     for w in reader.warnings:
         notes.append(f"warning: {w}")
     return mfa, notes

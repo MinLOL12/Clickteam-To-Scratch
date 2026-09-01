@@ -5,17 +5,40 @@
   const filesEl = $('files');
   const state = { files: [], busy: false };
 
-  window.cts.onLog((line) => {
-    if (logEl.textContent.startsWith('Waiting')) logEl.textContent = '';
-    logEl.textContent += line + '\n';
-    logEl.scrollTop = logEl.scrollHeight;
-  });
-
-  function addLog(line) {
-    if (logEl.textContent.startsWith('Waiting')) logEl.textContent = '';
-    logEl.textContent += line + '\n';
+  // The log is *appended* through a buffer and flushed once per frame:
+  // `logEl.textContent += line` re-serialises the whole box for every line,
+  // which turns a chatty conversion into quadratic DOM work and a window
+  // that stops painting.
+  const LOG_MAX_LINES = 4000;
+  let logLines = [];
+  let logDropped = 0;
+  let logStarted = false;
+  let logScheduled = false;
+  function flushLog() {
+    logScheduled = false;
+    if (!logLines.length) return;
+    const text = logLines.join('\n') + '\n';
+    logLines = [];
+    logEl.append(text);
     logEl.scrollTop = logEl.scrollHeight;
   }
+  function addLog(line) {
+    if (!logStarted) {
+      logStarted = true;
+      logEl.textContent = '';           // drop the "Waiting for files…" note
+    }
+    if (logLines.length >= LOG_MAX_LINES) {
+      logDropped++;
+      return;
+    }
+    logLines.push(line);
+    if (!logScheduled) {
+      logScheduled = true;
+      (window.requestAnimationFrame || ((f) => setTimeout(f, 16)))(flushLog);
+    }
+  }
+
+  window.cts.onLog(addLog);
 
   function refreshButtons() {
     $('convertBtn').disabled = state.busy || state.files.length === 0;
@@ -82,10 +105,27 @@
   }
 
   const seenWarns = new Set();
+  let warnSeen = 0, entryNodes = 0;
+  const MAX_ENTRIES = 400;      // the converter caps its list too
   function addEntry(type, text) {
     if (seenWarns.has(text)) return;
     seenWarns.add(text);
     const list = $('entries');
+    if (entryNodes >= MAX_ENTRIES) {
+      // Keep the panel small instead of re-laying out thousands of nodes,
+      // which is what used to make the window stop painting mid-conversion.
+      if (entryNodes === MAX_ENTRIES) {
+        const more = document.createElement('div');
+        more.className = 'entry note';
+        more.id = 'entriesMore';
+        list.appendChild(more);
+      }
+      entryNodes++;
+      const more = $('entriesMore');
+      if (more) more.textContent = '… further messages are in the summary below';
+      return;
+    }
+    entryNodes++;
     const e = document.createElement('div');
     e.className = 'entry ' + type;
     const ic = document.createElement('span'); ic.className = 'ic';
@@ -93,7 +133,9 @@
     e.append(ic, document.createTextNode(text));
     list.appendChild(e);
     $('warnCard').classList.remove('hidden');
-    $('warnCount').textContent = list.querySelectorAll('.entry.warn').length + ' warning(s)';
+    if (type === 'warn') warnSeen++;
+    // O(1): counting a JS variable beats a querySelectorAll scan per entry.
+    $('warnCount').textContent = warnSeen + ' warning(s)';
     list.scrollTop = list.scrollHeight;
   }
 
@@ -103,6 +145,7 @@
     $('warnCard').classList.add('hidden');
     $('entries').innerHTML = '';
     seenWarns.clear();
+    entryNodes = 0; warnSeen = 0;
     $('bar').classList.remove('done', 'err');
     $('fileName').textContent = '— ' + fileName;
     $('pctBig').textContent = '0%'; $('overallPct').textContent = '0%';

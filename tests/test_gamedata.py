@@ -617,5 +617,123 @@ class TestAudioExtractionDisabled(unittest.TestCase):
         self.assertFalse(any("sound bank unreadable" in note for note in notes))
 
 
+class TestDecryptionWorkSkipped(unittest.TestCase):
+    """The cipher is only run over payloads the converter actually reads.
+
+    Big games carry tens of megabytes of icons, embedded binaries and other
+    encrypted blocks in the game-data area.  Decrypting them in pure Python
+    was the single biggest contributor to the "stuck on decryption" stall, and
+    discarding the result afterwards, so they are now skipped outright.
+    """
+
+    def _load(self, exe):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "game.exe")
+            with open(path, "wb") as fh:
+                fh.write(exe)
+            return gamedata.load_game_data_from_exe(path)
+
+    def test_unused_encrypted_chunks_are_never_decrypted(self):
+        junk = b"\x00" * (64 * 1024)
+        # Chunk ids the SB3 export never reads, in three different encodings.
+        unused_ids = (8764, 8746, 8748)
+        flags = (gamedata.FLAG_ENCRYPTED, gamedata.FLAG_BOTH,
+                 gamedata.FLAG_COMPRESSED)
+        unused = [chunk(cid, junk, fl)
+                  for cid, fl in zip(unused_ids, flags)]
+        original_decode = gamedata._decode_chunk
+        seen = []
+
+        def spy(chunk_obj, *args, **kwargs):
+            seen.append(chunk_obj.id)
+            return original_decode(chunk_obj, *args, **kwargs)
+
+        with unittest.mock.patch.object(gamedata, "_decode_chunk",
+                                       side_effect=spy):
+            mfa, notes = self._load(_standard_exe(extra_chunks=tuple(unused)))
+
+        for cid in unused_ids:
+            self.assertNotIn(cid, seen, f"chunk {cid} was decrypted anyway")
+        # The project still converts, and the skip is explained once.
+        self.assertEqual(len(mfa.frames), 1)
+        self.assertTrue(any("left undecrypted" in n for n in notes), notes)
+        self.assertEqual(sum(1 for n in notes if "left undecrypted" in n), 1)
+        self.assertIn("192 KiB", " ".join(notes))
+
+    def test_used_chunks_are_still_decrypted(self):
+        # Guard against the gate being widened too far: the app name is read,
+        # so it must still go through the cipher.
+        exe = _standard_exe()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "game.exe")
+            with open(path, "wb") as fh:
+                fh.write(exe)
+            mfa, _notes = gamedata.load_game_data_from_exe(path)
+        self.assertEqual(mfa.name, "My Game")
+
+
+class TestKeyStreamCache(unittest.TestCase):
+    """One keystream per key, reused across chunks, must stay exact."""
+
+    @staticmethod
+    def _reference_keystream(n: int, table: bytes) -> bytes:
+        out = bytearray()
+        state = list(table)
+        i = j = 0
+        while len(out) < n:
+            i = (i + 1) & 0xFF
+            si = state[i]
+            j = (j + si) & 0xFF
+            sj = state[j]
+            state[i] = sj
+            state[j] = si
+            out.append(state[(si + sj) & 0xFF])
+        return bytes(out)
+
+    def test_cache_boundaries_match_the_per_byte_cipher(self):
+        table = gamedata._init_decryption_table(
+            gamedata._make_key("Game", "(c)", "g.mfa"))
+        ref = self._reference_keystream(40000, table)
+        decryptor = gamedata._Decryptor(292)
+        sizes = [16, 100, 1000, 4095, 4096, 4097, 12000, 3, 40000, 512]
+        with unittest.mock.patch.object(gamedata, "_KEYSTREAM_CACHE_MAX", 4096):
+            for size in sizes:
+                plain = os.urandom(size)
+                enc = decryptor.decode(plain, 8740, "Game", "(c)", "g.mfa")
+                self.assertEqual(enc, bytes(a ^ b for a, b in zip(plain, ref)),
+                                 f"payload of {size} bytes")
+                # ...and the cipher is its own inverse.
+                self.assertEqual(
+                    decryptor.decode(enc, 8740, "Game", "(c)", "g.mfa"), plain)
+
+    def test_oversized_payload_is_not_cached(self):
+        table = gamedata._init_decryption_table(
+            gamedata._make_key("Game", "(c)", "g.mfa"))
+        ref = self._reference_keystream(6000, table)
+        stream = gamedata._KeyStream(table)
+        with unittest.mock.patch.object(gamedata, "_KEYSTREAM_CACHE_MAX", 1024):
+            big = stream.need(6000)
+            self.assertEqual(bytes(big), ref[:6000])
+            self.assertLess(len(stream.buf), 6000,
+                            "a one-off oversized stream must not be cached")
+            self.assertEqual(bytes(stream.need(100)), ref[:100])
+
+    def test_long_key_material_does_not_break_every_chunk(self):
+        # The runtime copies the three strings into a fixed 256-byte buffer,
+        # leaving room for one checksum byte.  Key material past that point
+        # simply does not exist — and must not raise: an IndexError here used
+        # to abort the decryption of *every* encrypted chunk in the game.
+        key = gamedata._make_key("N" * 300, "C" * 300, "E" * 300)
+        self.assertEqual(len(key), gamedata._KEY_BYTES)
+        short = gamedata._make_key("N" * 100, "C" * 100, "E" * 100)
+        self.assertEqual(short,
+                         gamedata._make_key("N" * 100, "C" * 100,
+                                            "E" * 100 + "IGNORED TAIL"))
+        # A difference *inside* the buffer still changes the key.
+        self.assertNotEqual(short,
+                            gamedata._make_key("N" * 100, "C" * 100,
+                                               "e" * 100))
+
+
 if __name__ == "__main__":
     unittest.main()
